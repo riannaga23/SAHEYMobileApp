@@ -20,19 +20,12 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-<<<<<<< HEAD
       "output": "server",
-=======
-      "output": "static",
->>>>>>> 7f661aeaabf731df817448e8bedd2499203dae18
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
-<<<<<<< HEAD
       "expo-secure-store",
-=======
->>>>>>> 7f661aeaabf731df817448e8bedd2499203dae18
       [
         "expo-splash-screen",
         {
