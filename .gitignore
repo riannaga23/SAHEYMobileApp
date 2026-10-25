@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+*.apk
+*.aab
+
+# Local configuration
+.env
+.env.local
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
