@@ -7,7 +7,7 @@ export async function POST(request: Request) {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.SAHEY_FROM_EMAIL;
   if (!key || !from) {
-    const missing = [!key && 'RESEND_API_KEY', !from && 'SAHEY_FROM_EMAIL'].filter(Boolean);
+    const missing = [!key && 'email API key', !from && 'sender email address'].filter(Boolean);
     return Response.json({ error: `Email server is missing: ${missing.join(', ')}. Check saheymobileapp/.env.local and fully restart Expo.` }, { status: 503 });
   }
 
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
   // Contacts are saved on the phone, not in a separate server-side recipient list.
   const recipients = (to as string[]).map(email => email.trim().toLowerCase());
 
-  let message = 'This is a test of SAHEY. No assistance is needed.';
+  let message = 'This is a test of Halo. No assistance is needed.';
   if (location !== undefined) {
     if (!location || typeof location !== 'object') {
       return Response.json({ error: 'Invalid location.' }, { status: 400 });
@@ -53,14 +53,14 @@ export async function POST(request: Request) {
         body: JSON.stringify({
           from,
           to: [email],
-          subject: 'TEST — SAHEY alert',
+          subject: 'TEST — Halo alert',
           text: message,
         }),
       });
       const body = await result.json();
       if (result.ok && typeof body.id === 'string' && body.id) accepted++;
       else if (typeof body.message === 'string' && /only send testing|verify a domain|domain.*not verified/i.test(body.message)) {
-        failureReason = 'Resend requires a verified sender domain to email other people. Verify a domain in Resend and set SAHEY_FROM_EMAIL to an address on that domain. The resend.dev test sender can only email your Resend account address.';
+        failureReason = 'Resend requires a verified sender domain to email other people. Verify a domain in Resend and update the configured sender address to use that domain. The resend.dev test sender can only email your Resend account address.';
       } else {
         failureReason = `Resend did not confirm the email (HTTP ${result.status}). Check your sender address, API key permissions, and Resend dashboard.`;
       }

@@ -6,8 +6,8 @@ export async function previewTestAlert() {
 
   return {
     to: contacts.map((contact) => contact.email),
-    subject: 'TEST — SAHEY alert',
-    message: 'This is a test of SAHEY. No assistance is needed.',
+    subject: 'TEST — Halo alert',
+    message: 'This is a test of Halo. No assistance is needed.',
   };
 }
 

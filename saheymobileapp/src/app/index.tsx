@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from 'react-native';
 export default function MenuScreen() {
   return (
     <View style={styles.container}>
-      <Text style={styles.heading}>SAHEY Setup</Text>
+      <Text style={styles.heading}>Halo Setup</Text>
       <Text style={styles.description}>
         Choose what you would like to set up.
       </Text>

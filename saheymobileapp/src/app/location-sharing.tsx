@@ -45,7 +45,7 @@ export default function LocationSharingScreen() {
 
           Alert.alert(
               'Permission Denied',
-              'SAHEY needs location access to share your location.'
+              'Halo needs location access to share your location.'
           );
       }
     } catch (error) {
@@ -67,7 +67,7 @@ export default function LocationSharingScreen() {
        }
         try {
             await Share.share({
-              message: `SAHEY Location Alert\nHere is my location: ${mapsUrl}`,
+              message: `Halo Location Alert\nHere is my location: ${mapsUrl}`,
             });
             } catch (error) {
                 console.error('Location sharing error:', error);
