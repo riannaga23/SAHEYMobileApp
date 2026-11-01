@@ -1,11 +1,12 @@
 ﻿import * as Location from 'expo-location';
 import { useState } from 'react';
-import { Alert, Button, StyleSheet, Text, View } from 'react-native';
+import { Alert, Button, Linking, Share, StyleSheet, Text, View } from 'react-native';
 
 export default function LocationSharingScreen() {
   const [permissionStatus, setPermissionStatus] = useState('Not requested');
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude]= useState<number | null>(null);
+  const [mapsUrl, setMapsUrl] = useState<string | null>(null);
   async function requestLocationPermission() {
     try {
       const permission =
@@ -16,13 +17,22 @@ export default function LocationSharingScreen() {
       if (permission.status === 'granted') {
         setPermissionStatus('Granted');
 
-        const location = await Location.getLastKnownPositionAsync(); // checks whether Android has a previously recorded location.
+        const location = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+            }); // expo asks android for a current location reading
         if (location) {
             console.log('Latitude:', location.coords.latitude);
             console.log('Longitude:', location.coords.longitude);
 
             setLatitude(location.coords.latitude);
             setLongitude(location.coords.longitude);
+
+            const generatedMapsUrl = `https://www.google.com/maps/search/?api=1&query=${location.coords.latitude},${location.coords.longitude}`;
+
+            setMapsUrl(generatedMapsUrl);
+
+            console.log('Google Maps URL:', generatedMapsUrl);
+
         } else {
             console.log('No Cached location available');
         }
@@ -36,13 +46,30 @@ export default function LocationSharingScreen() {
       }
     } catch (error) {
       console.error('Location permission error:', error);
-
+      Alert.alert('Location Error Details', String(error));
       Alert.alert(
-        'Error',
-        'Unable to request location permission.'
+        'Location Error',
+        'Unable to retrieve your location. Please check that your location services are enabled and try again.'
       );
     }
   }
+  async function shareLocation() {
+      if (mapsUrl == null) {
+          Alert.alert(
+              'Location Unavailable',
+              'Please enable location before sharing.'
+              );
+              return;
+       }
+        try {
+            await Share.share({
+              message: `SAHEY Location Alert\nHere is my location: ${mapsUrl}`,
+            });
+            } catch (error) {
+                console.error('Location sharing error:', error);
+                Alert.alert('Error', 'Unable to open location sharing.');
+            }
+        }
 
   return (
     <View style={styles.container}>
@@ -60,7 +87,14 @@ export default function LocationSharingScreen() {
         Longitude: {longitude != null ? longitude : 'Not available'}
       </Text>
 
-
+      {mapsUrl != null && (
+          <Button
+            title="Open in Google Maps"
+            onPress={() => Linking.openURL(mapsUrl)}/> )}
+      {mapsUrl != null && (
+          <Button
+            title="Share My Location"
+            onPress={shareLocation}/>)}
       <Button
         title="Enable Location"
         onPress={requestLocationPermission}
