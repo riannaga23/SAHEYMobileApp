@@ -1,12 +1,15 @@
 ﻿import * as Location from 'expo-location';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Alert, Button, Linking, Share, StyleSheet, Text, View } from 'react-native';
+import { sendTestAlert } from '../lib/alert';
 
 export default function LocationSharingScreen() {
   const [permissionStatus, setPermissionStatus] = useState('Not requested');
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude]= useState<number | null>(null);
   const [mapsUrl, setMapsUrl] = useState<string | null>(null);
+  const [emailBusy, setEmailBusy] = useState(false);
+  const emailInFlight = useRef(false);
   async function requestLocationPermission() {
     try {
       const permission =
@@ -32,6 +35,7 @@ export default function LocationSharingScreen() {
             setMapsUrl(generatedMapsUrl);
 
             console.log('Google Maps URL:', generatedMapsUrl);
+            return location;
 
         } else {
             console.log('No Cached location available');
@@ -71,6 +75,32 @@ export default function LocationSharingScreen() {
             }
         }
 
+  async function emailLocation() {
+    if (emailInFlight.current) return;
+    emailInFlight.current = true;
+    setEmailBusy(true);
+    try {
+      // Reuse the existing permission/GPS flow. Never email old screen coordinates.
+      const location = await requestLocationPermission();
+      if (!location) return;
+      if (Date.now() - location.timestamp > 60_000) {
+        throw new Error('GPS returned an old location. Please acquire a fresh location and try again.');
+      }
+      const { accepted, failed } = await sendTestAlert({
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        acquiredAt: new Date(location.timestamp).toISOString(),
+      });
+      Alert.alert(accepted > 0 ? 'Location email results' : 'Location email not confirmed',
+        `${accepted} accepted by the email provider; ${failed} failed or unconfirmed. Check the recipient inboxes.`);
+    } catch (error) {
+      Alert.alert('Location email not confirmed', error instanceof Error ? error.message : 'Unable to email your location. Check the backend and connection.');
+    } finally {
+      emailInFlight.current = false;
+      setEmailBusy(false);
+    }
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.heading}>Location Sharing</Text>
@@ -95,6 +125,11 @@ export default function LocationSharingScreen() {
           <Button
             title="Share My Location"
             onPress={shareLocation}/>)}
+      <Button
+        title={emailBusy ? 'Getting GPS / sending email...' : 'Email My Location (test)'}
+        onPress={emailLocation}
+        disabled={emailBusy}
+      />
       <Button
         title="Enable Location"
         onPress={requestLocationPermission}

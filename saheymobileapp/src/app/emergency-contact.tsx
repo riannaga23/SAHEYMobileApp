@@ -1,4 +1,3 @@
-﻿import { StyleSheet, Text, View } from 'react-native';
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { previewTestAlert, sendTestAlert } from '../lib/alert';
