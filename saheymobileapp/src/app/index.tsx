@@ -10,13 +10,13 @@ export default function MenuScreen() {
       </Text>
 
       <Link href="/tapping-pattern" style={styles.link}>
-        Set Tapping Pattern ΓåÆ
+        Set Tapping Pattern {'\u2192'}
       </Link>
       <Link href="/emergency-contact" style={styles.link}>
-        Emergency Contact ΓåÆ
+        Emergency Contact {'\u2192'}
       </Link>
       <Link href="/location-sharing" style={styles.link}>
-        Location Sharing ΓåÆ
+        Location Sharing {'\u2192'}
       </Link>
     </View>
   );
