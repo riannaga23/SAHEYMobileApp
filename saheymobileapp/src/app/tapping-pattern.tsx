@@ -10,6 +10,9 @@ const MIN_TAPS = 3;
 const PAUSE_MS = 2000;
 // The bracelet connection must emit this event once per physical tap.
 // No screen interaction emits it, and Bluetooth transport is not implemented here.
+// TODO BLE: The shared service should normalize the agreed firmware protocol here.
+// Handle "TAP #" totals from the bracelet; if firmware sends individual tap events,
+// increment once per received event instead. This event name is an internal app hook.
 const BRACELET_TAP_EVENT = 'sahey.bracelet.tap';
 type Phase = 'loading' | 'load-error' | 'recording' | 'too-few' | 'saving' | 'save-error' | 'saved';
 type Dialog = 'reset' | 'discard' | null;
@@ -46,6 +49,10 @@ export default function TappingPatternScreen() {
     setDialog(next);
   }
 
+  // TODO BLE: When starting setup, subscribe to bracelet notifications BEFORE
+  // sending "BEGIN SET UP", so the first tap can be received. After the command
+  // succeeds, clear the displayed count and show the recording state.
+  // Synchronize with the bracelet rather than treating the local cache as its state.
   const load = useCallback(async () => {
     phaseRef.current = 'loading';
     setPhase('loading');
@@ -72,6 +79,9 @@ export default function TappingPatternScreen() {
     mounted.current = true;
     void load();
     const subscription = AppState.addEventListener('change', (state) => {
+      // TODO BLE: Handle bracelet disconnection and command failures: show setup
+      // interrupted, never success. On reconnection, synchronize before resuming.
+      // AppState changes alone do not establish the bracelet's connection status.
       if (state !== 'active') clearTimer();
     });
     return () => {
@@ -107,10 +117,20 @@ export default function TappingPatternScreen() {
     return () => {
       clearTimer();
       subscription.remove();
+      // TODO BLE: Remove only the tapping screen's UI subscription on blur/unmount.
+      // Keep the shared BLE connection and app-level distress listener active
+      // while the app is running. Suspended/closed-app operation is separate work.
       braceletSubscription.remove();
     };
   }, [clearTimer, requestExit]));
 
+  // TODO BLE: Handle "TOO FEW TAPS" from the bracelet. Show:
+  // "You must have at least 3 taps in your pattern."
+  // Keep Reset pattern available so the user can restart setup.
+  // TODO BLE: Handle "PATTERN SAVED", sent by the bracelet after 2 seconds of
+  // inactivity. Stop recording and retain the received count for the saved display.
+  // Replace the current phone-side inactivity timer/local auto-save flow with that
+  // confirmation. Do not infer a bracelet save merely because the count reaches 3.
   async function finishPattern() {
     clearTimer();
     if (!mounted.current || saving.current || dialogRef.current !== null) return;
@@ -120,6 +140,10 @@ export default function TappingPatternScreen() {
     changePhase('saving');
     setError('');
     try {
+      // TODO BLE: A phone cache write does not confirm bracelet storage.
+      // After "PATTERN SAVED", send "DETECTION MODE ACTIVE". Show setup completion
+      // only after the write succeeds. If firmware provides an acknowledgment,
+      // wait for it before showing that detection is active.
       await saveTapCount(value);
       if (!mounted.current) return;
       savedCount.current = value;
@@ -133,6 +157,8 @@ export default function TappingPatternScreen() {
     }
   }
 
+  // TODO BLE: Handle "TAP #" notifications while recording. Update the displayed
+  // count using the total reported by the bracelet if the agreed protocol sends totals.
   function receiveBraceletTap() {
     if (!mounted.current || (AppState.currentState && AppState.currentState !== 'active')) return;
     if (phaseRef.current !== 'recording' || dialogRef.current !== null) return;
@@ -144,6 +170,9 @@ export default function TappingPatternScreen() {
 
   braceletTapHandler.current = receiveBraceletTap;
 
+  // TODO BLE: Use this same restart handler whether a pattern is saved, recording
+  // is in progress, or setup was rejected. On confirmation of "Set new pattern",
+  // send "BEGIN SET UP". Clear the count and return to recording only after success.
   function resetPattern() {
     clearTimer();
     draftCount.current = 0;
