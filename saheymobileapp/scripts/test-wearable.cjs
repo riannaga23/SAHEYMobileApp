@@ -4,11 +4,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
+const HALO_SERVICE_UUID =
+  '7d31d9c0-54fa-4b79-9e15-68ddc5fb7401';
+
+const HALO_NOTIFY_UUID =
+  '7d31d9c0-54fa-4b79-9e15-68ddc5fb7402';
 
 function fixture(options = {}) {
   const storage = options.storage || new Map();
   const events = {};
-  const calls = { nativeImports: 0, connects: 0, disconnects: 0, scans: 0, notifications: [] };
+  const calls = { nativeImports: 0, connects: 0, disconnects: 0, scans: 0, notifications: [], emitted: [] };
   const native = {
     start: async () => {}, checkState: async () => options.bluetoothOff ? 'off' : 'on',
     scan: async scan => { calls.scans++; assert.equal(scan.seconds, 15); assert.equal(scan.serviceUUIDs.length, 0); },
@@ -28,6 +33,7 @@ function fixture(options = {}) {
     'expo-device': { isDevice: !options.emulator },
     'expo-secure-store': { getItemAsync: async key => storage.get(key) ?? null, setItemAsync: async (key, value) => storage.set(key, value) },
     'react-native': {
+      DeviceEventEmitter: { emit: (...args) => calls.emitted.push(args) },
       Platform: { OS: 'android', Version: options.androidVersion || 35 },
       PermissionsAndroid: {
         PERMISSIONS: { BLUETOOTH_SCAN: 'scan', BLUETOOTH_CONNECT: 'connect', ACCESS_FINE_LOCATION: 'location' }, RESULTS: { GRANTED: 'granted' },
@@ -141,26 +147,93 @@ test('Bluetooth turning off clears live connection', async () => {
   assert.equal(f.service.getWearableSnapshot().phase, 'disconnected');
 });
 
-const messageCharacteristic = { service: 'test-service', characteristic: 'message', properties: { Notify: 'Notify' } };
-const notification = text => ({ peripheral: board.id, service: 'test-service', characteristic: 'message', value: [...Buffer.from(text)] });
+const messageCharacteristic = {
+  service: '7d31d9c0-54fa-4b79-9e15-68ddc5fb7401',
+  characteristic: '7d31d9c0-54fa-4b79-9e15-68ddc5fb7402',
+  properties: { Notify: 'Notify' },
+};
+const notification = text => ({
+  peripheral: board.id,
+  service: '7d31d9c0-54fa-4b79-9e15-68ddc5fb7401',
+  characteristic: '7d31d9c0-54fa-4b79-9e15-68ddc5fb7402',
+  value: [...Buffer.from(text)],
+});
+
 
 test('subscribes to notifications and receives distress text only from the selected board and characteristic', async () => {
   const f = fixture({ characteristics: [messageCharacteristic] });
+
   await f.service.connectWearable(board);
-  assert.deepEqual(f.calls.notifications, [[board.id, 'test-service', 'message']]);
-  f.events.value({ ...notification('wrong board'), peripheral: 'OTHER' });
-  f.events.value({ ...notification('wrong characteristic'), characteristic: 'other' });
+
+  // Expect the real HALO notification UUIDs.
+  assert.deepEqual(f.calls.notifications, [
+    [
+      board.id,
+      '7d31d9c0-54fa-4b79-9e15-68ddc5fb7401',
+      '7d31d9c0-54fa-4b79-9e15-68ddc5fb7402',
+    ],
+  ]);
+
+  f.events.value({
+    ...notification('wrong board'),
+    peripheral: 'OTHER',
+  });
+
+  f.events.value({
+    ...notification('wrong characteristic'),
+    characteristic: 'other',
+  });
+
   assert.equal(f.service.getWearableSnapshot().message, null);
+
   f.events.value(notification('CONFIRMEDDISTRESS\0'));
-  assert.equal(f.service.getWearableSnapshot().message.text, 'CONFIRMEDDISTRESS');
-  assert.ok(f.service.getWearableSnapshot().message.receivedAt > 0);
+
+  assert.equal(
+    f.service.getWearableSnapshot().message.text,
+    'CONFIRMEDDISTRESS'
+  );
+
+  assert.ok(
+    f.service.getWearableSnapshot().message.receivedAt > 0
+  );
+  assert.equal(f.calls.emitted.length, 1);
+  assert.equal(f.calls.emitted[0][0], 'sahey.distress.confirmed');
+  assert.equal(f.calls.emitted[0][1].deviceId, board.id);
+  assert.equal(f.calls.emitted[0][1].receivedAt, f.service.getWearableSnapshot().message.receivedAt);
+
   f.events.disconnect({ peripheral: board.id });
+
   f.events.value(notification('late message'));
-  assert.equal(f.service.getWearableSnapshot().message.text, 'CONFIRMEDDISTRESS');
+
+  assert.equal(
+    f.service.getWearableSnapshot().message.text,
+    'CONFIRMEDDISTRESS'
+  );
+
   await f.service.connectWearable(board);
+
   assert.equal(f.service.getWearableSnapshot().message, null);
   assert.equal(f.calls.notifications.length, 2);
 });
+
+test('only complete confirmed distress messages emit email events', async () => {
+  const f = fixture({ characteristics: [messageCharacteristic] });
+  await f.service.connectWearable(board);
+  for (const text of ['distress', 'UNCONFIRMEDDISTRESS', 'NOT CONFIRMED DISTRESS', 'TAP 1', 'PATTERN SAVED']) {
+    f.events.value(notification(text));
+  }
+  f.events.value({ ...notification('CONFIRMEDDISTRESS'), peripheral: 'OTHER' });
+  f.events.value({ ...notification('CONFIRMEDDISTRESS'), characteristic: 'OTHER' });
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 0);
+  for (const text of ['CONFIRMEDDISTRESS', 'Confirmed distress\0', 'CONFIRMED_DISTRESS', 'confirmed-distress']) {
+    f.events.value(notification(text));
+  }
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 4);
+  f.events.disconnect({ peripheral: board.id });
+  f.events.value(notification('CONFIRMEDDISTRESS'));
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 4);
+});
+
 
 test('missing or failed notifications keep connection but explain message availability', async () => {
   for (const options of [{}, { characteristics: [messageCharacteristic], failNotify: true }]) {

@@ -1,10 +1,15 @@
-﻿import { Stack, useFocusEffect, useRouter } from 'expo-router';
+import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, AppState, BackHandler, DeviceEventEmitter, Modal, Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { loadTapCount, saveTapCount } from '../lib/tappingPattern';
+import {
+  sendWearableCommand,
+  subscribeWearable,
+  getWearableSnapshot,
+} from '../lib/wearable';
 
 const MIN_TAPS = 3;
 const PAUSE_MS = 2000;
@@ -14,7 +19,9 @@ const PAUSE_MS = 2000;
 // Handle "TAP #" totals from the bracelet; if firmware sends individual tap events,
 // increment once per received event instead. This event name is an internal app hook.
 const BRACELET_TAP_EVENT = 'sahey.bracelet.tap';
-type Phase = 'loading' | 'load-error' | 'recording' | 'too-few' | 'saving' | 'save-error' | 'saved';
+const BRACELET_TOO_FEW_EVENT = 'sahey.bracelet.too-few';
+const BRACELET_PATTERN_SAVED_EVENT = 'sahey.bracelet.pattern-saved';
+type Phase = 'idle' | 'loading' | 'load-error' | 'recording' | 'too-few' | 'saving' | 'save-error' | 'saved';
 type Dialog = 'reset' | 'discard' | null;
 
 export default function TappingPatternScreen() {
@@ -31,7 +38,8 @@ export default function TappingPatternScreen() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(true);
   const saving = useRef(false);
-  const braceletTapHandler = useRef<() => void>(() => {});
+  const braceletTapHandler = useRef<(count: number) => void>(() => {});
+  const setupArmed = useRef(false);
 
   const clearTimer = useCallback(() => {
     if (timer.current !== null) clearTimeout(timer.current);
@@ -64,8 +72,9 @@ export default function TappingPatternScreen() {
       draftCount.current = value ?? 0;
       setCount(value ?? 0);
       // Legacy counts below three remain in storage until a valid replacement is saved.
-      const next = value === null ? 'recording' : value < MIN_TAPS ? 'too-few' : 'saved';
+      const next: Phase = value === null? 'idle': value < MIN_TAPS? 'idle': 'saved';
       phaseRef.current = next;
+      setupArmed.current = false;
       setPhase(next);
     } catch {
       if (!mounted.current) return;
@@ -91,11 +100,38 @@ export default function TappingPatternScreen() {
     };
   }, [clearTimer, load]);
 
+  // NEW: Stop tapping-pattern setup if Bluetooth disconnects.
+useEffect(() => {
+  const checkConnection = () => {
+    const snapshot = getWearableSnapshot();
+
+    if (
+      setupArmed.current &&
+      snapshot.phase !== 'connected'
+    ) {
+      setupArmed.current = false;
+      clearTimer();
+      setError(
+        'Wearable disconnected. Reconnect to restart setup.'
+      );
+      changePhase('idle');
+    }
+  };
+
+  const unsubscribe = subscribeWearable(checkConnection);
+
+  return () => {
+    unsubscribe();
+  };
+}, [clearTimer]);
+
   const exit = useCallback(() => {
-    clearTimer();
-    if (router.canGoBack()) router.back();
-    else router.replace('/');
-  }, [clearTimer, router]);
+  setupArmed.current = false;
+  clearTimer();
+
+  if (router.canGoBack()) router.back();
+  else router.replace('/');
+}, [clearTimer, router]);
 
   const requestExit = useCallback(() => {
     if (saving.current) return;
@@ -109,20 +145,82 @@ export default function TappingPatternScreen() {
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       requestExit();
+      setupArmed.current = false;
       return true;
     });
-    const braceletSubscription = DeviceEventEmitter.addListener(BRACELET_TAP_EVENT, () => {
-      braceletTapHandler.current();
-    });
+    const braceletSubscription = DeviceEventEmitter.addListener(
+      BRACELET_TAP_EVENT,
+      (count: number) => {
+        braceletTapHandler.current(count);
+    }
+    );
+
+const tooFewSubscription = DeviceEventEmitter.addListener(
+  BRACELET_TOO_FEW_EVENT,
+  () => {
+    if (!setupArmed.current) return;
+    if (phaseRef.current !== 'recording') return;
+
+    setupArmed.current = false;
+    clearTimer();
+    changePhase('too-few');
+  }
+);
+
+const patternSavedSubscription = DeviceEventEmitter.addListener(
+  BRACELET_PATTERN_SAVED_EVENT,
+  () => {
+    if (!setupArmed.current) return;
+    if (phaseRef.current !== 'recording') return;
+
+    // Firmware has confirmed setup completion.
+    setupArmed.current = false;
+
+    void finishPattern();
+  }
+);
+
     return () => {
       clearTimer();
       subscription.remove();
-      // TODO BLE: Remove only the tapping screen's UI subscription on blur/unmount.
-      // Keep the shared BLE connection and app-level distress listener active
-      // while the app is running. Suspended/closed-app operation is separate work.
-      braceletSubscription.remove();
+      [braceletSubscription, tooFewSubscription, patternSavedSubscription].forEach(
+        (uiSubscription) => uiSubscription.remove()
+      );
     };
   }, [clearTimer, requestExit]));
+
+const startingSetup = useRef(false);
+
+async function beginBraceletSetup() {
+  if (startingSetup.current || saving.current) return;
+
+  startingSetup.current = true;
+  setupArmed.current = true;
+  setError('');
+
+  clearTimer();
+  draftCount.current = 0;
+  setCount(0);
+  changePhase('recording');
+
+  try {
+    await sendWearableCommand('BEGIN SET UP');
+
+    console.log('[HALO] Wearable setup command written');
+  } catch (error) {
+    setupArmed.current = false;
+    changePhase('idle');
+
+    setError(
+      error instanceof Error
+        ? error.message
+        : 'Could not begin wearable setup.'
+    );
+  } finally {
+    startingSetup.current = false;
+  }
+}
+
 
   // TODO BLE: Handle "TOO FEW TAPS" from the bracelet. Show:
   // "You must have at least 3 taps in your pattern."
@@ -131,64 +229,103 @@ export default function TappingPatternScreen() {
   // inactivity. Stop recording and retain the received count for the saved display.
   // Replace the current phone-side inactivity timer/local auto-save flow with that
   // confirmation. Do not infer a bracelet save merely because the count reaches 3.
-  async function finishPattern() {
-    clearTimer();
-    if (!mounted.current || saving.current || dialogRef.current !== null) return;
-    const value = draftCount.current;
-    if (value < MIN_TAPS) { changePhase('too-few'); return; }
-    saving.current = true;
-    changePhase('saving');
-    setError('');
-    try {
-      // TODO BLE: A phone cache write does not confirm bracelet storage.
-      // After "PATTERN SAVED", send "DETECTION MODE ACTIVE". Show setup completion
-      // only after the write succeeds. If firmware provides an acknowledgment,
-      // wait for it before showing that detection is active.
-      await saveTapCount(value);
-      if (!mounted.current) return;
-      savedCount.current = value;
-      changePhase('saved');
-    } catch {
-      if (!mounted.current) return;
-      setError('Could not save your pattern. Your taps are still here. Please try again.');
-      changePhase('save-error');
-    } finally {
-      saving.current = false;
-    }
+
+async function finishPattern() {
+  clearTimer();
+
+  if (!mounted.current ||
+      saving.current ||
+      dialogRef.current !== null ||
+      phaseRef.current !== 'recording') {
+    return;
   }
+
+  const value = draftCount.current;
+
+  if (value < MIN_TAPS) {
+    changePhase('too-few');
+    return;
+  }
+
+  saving.current = true;
+  changePhase('saving');
+  setError('');
+
+  try {
+    // Called only after firmware sends PATTERN SAVED.
+    await saveTapCount(value);
+
+    // Request detection mode on the wearable.
+    await sendWearableCommand('DETECTION MODE');
+
+    if (!mounted.current) return;
+
+    savedCount.current = value;
+    changePhase('saved');
+
+    console.log('[HALO] Detection mode command sent');
+  } catch (error) {
+    if (!mounted.current) return;
+
+    setError(
+      error instanceof Error
+        ? error.message
+        : 'Could not complete wearable setup.'
+    );
+
+    changePhase('save-error');
+  } finally {
+    saving.current = false;
+  }
+}
+
 
   // TODO BLE: Handle "TAP #" notifications while recording. Update the displayed
   // count using the total reported by the bracelet if the agreed protocol sends totals.
-  function receiveBraceletTap() {
-    if (!mounted.current || (AppState.currentState && AppState.currentState !== 'active')) return;
-    if (phaseRef.current !== 'recording' || dialogRef.current !== null) return;
-    clearTimer();
-    draftCount.current = Math.min(draftCount.current + 1, Number.MAX_SAFE_INTEGER);
-    setCount(draftCount.current);
-    timer.current = setTimeout(() => { void finishPattern(); }, PAUSE_MS);
+
+
+function receiveBraceletTap(count: number) {
+  if (
+    !mounted.current ||
+    AppState.currentState !== 'active'
+  ) {
+    return;
   }
+
+  // Never update the setup counter outside an active session.
+  if (
+    !setupArmed.current ||
+    phaseRef.current !== 'recording' ||
+    dialogRef.current !== null
+  ) {
+    return;
+  }
+
+  if (!Number.isSafeInteger(count) || count < 1) {
+    return;
+  }
+
+  draftCount.current = count;
+  setCount(count);
+
+  console.log('[HALO] Setup tap count:', count);
+}
+
+
 
   braceletTapHandler.current = receiveBraceletTap;
 
   // TODO BLE: Use this same restart handler whether a pattern is saved, recording
   // is in progress, or setup was rejected. On confirmation of "Set new pattern",
   // send "BEGIN SET UP". Clear the count and return to recording only after success.
-  function resetPattern() {
-    clearTimer();
-    draftCount.current = 0;
-    setCount(0);
-    setError('');
+  async function resetPattern() {
     showDialog(null);
-    changePhase('recording');
+    await beginBraceletSetup();
   }
 
   function closeDialog() {
-    showDialog(null);
-    // Resume the pause window if a recording was interrupted by a dialog.
-    if (phaseRef.current === 'recording' && draftCount.current > 0) {
-      timer.current = setTimeout(() => { void finishPattern(); }, PAUSE_MS);
-    }
-  }
+  showDialog(null);
+}
 
   const busy = phase === 'saving' || phase === 'loading';
   const isSaved = phase === 'saved';
@@ -252,6 +389,14 @@ export default function TappingPatternScreen() {
             {phase === 'save-error' && <Text style={styles.error} accessibilityRole="alert">{error}</Text>}
             <View style={styles.actions}>
               {phase === 'save-error' && <Button label="Try saving again" onPress={() => { void finishPattern(); }} />}
+              <Button
+                label="Begin wearable setup"
+                onPress={() => void beginBraceletSetup()}
+                disabled={busy}
+              />
+              {!!error && phase !== 'save-error' && (
+                <Text style={styles.error}>{error}</Text>
+        )}
               <Button label="Reset pattern" secondary disabled={busy} onPress={() => showDialog('reset')} />
               <Button label="Back to setup menu" quiet={!isSaved} disabled={busy} onPress={requestExit} />
             </View>
@@ -267,10 +412,17 @@ export default function TappingPatternScreen() {
               : 'Start recording a new tapping pattern. Your previous count stays saved until the new pattern is saved.'}</Text>
             <View style={styles.row}>
               <Button label={dialog === 'discard' ? 'Keep editing' : 'Cancel'} secondary onPress={closeDialog} />
-              <Button label={dialog === 'discard' ? 'Leave setup' : 'Set new pattern'} onPress={() => {
-                if (dialog === 'discard') { showDialog(null); exit(); }
-                else resetPattern();
-              }} />
+              <Button
+                label={dialog === 'discard' ? 'Leave setup' : 'Set new pattern'}
+                onPress={() => {
+                  if (dialog === 'discard') {
+                    showDialog(null);
+                    exit();
+                  } else {
+                    void resetPattern();
+                  }
+            }}
+          />
             </View>
           </View>
         </View>
