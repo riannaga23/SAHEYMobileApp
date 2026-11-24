@@ -1,6 +1,7 @@
 ﻿import { Link, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, DeviceEventEmitter, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ui } from '../components/ui/app-layout';
 import { WearableMessage } from '../components/wearable-message';
 import { useWearable } from '../hooks/use-wearable';
 import { loadWearableSetup } from '../lib/wearableStorage';
@@ -18,68 +19,49 @@ export default function MenuScreen() {
     }).catch(() => { if (active) router.replace('/wearable-setup'); });
     return () => { active = false; };
   }, [router]);
-  if (checkingSetup) return <View style={styles.container}><ActivityIndicator accessibilityLabel="Loading Halo setup" /></View>;
+  if (checkingSetup) return <View style={[ui.screen, styles.loading]}><ActivityIndicator accessibilityLabel="Loading Halo setup" /></View>;
   return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>Halo Setup</Text>
-      <Text style={styles.description}>
-        Choose what you would like to set up.
-      </Text>
-
-      <Link href="/tapping-pattern" style={styles.link}>
-        Set Tapping Pattern
-      </Link>
-      <Link href="/emergency-contact" style={styles.link}>
-        Emergency Contact
-      </Link>
-      <Link href="/location-sharing" style={styles.link}>
-        Location Sharing
-      </Link>
-      <Link href="/wearable-setup" style={styles.link}>Wearable Connection</Link>
-      <Text style={styles.description}>{wearable.connected ? `Connected to ${wearable.connected.name}` : 'Wearable not connected'}</Text>
-
-      {__DEV__ && (
-        <Pressable
-          onPress={() => {
-            console.log('[SAHEY TEST] Simulating distress');
-
-             DeviceEventEmitter.emit('sahey.distress.confirmed');
-          }}
-          style={{
-              backgroundColor: '#B00020',
-              padding: 16,
-              borderRadius: 12,
-              alignItems: 'center',
-              marginTop: 20,
-          }}
-        >
-          <Text
-            style={{
-              color: '#FFFFFF',
-              fontWeight: '700',
-              fontSize: 16,
-          }}
-          >
-      Simulate Distress (DEV ONLY)
-    </Text>
-  </Pressable>
-)}
-
+    <ScrollView style={ui.screen} contentContainerStyle={ui.content}>
+      <View style={styles.intro}>
+        <Text style={styles.brand}>HALO</Text>
+        <Text style={ui.heading}>Your Halo</Text>
+        <Text style={ui.body}>Manage your wearable and the people who receive your alerts.</Text>
+      </View>
+      <View style={ui.card}>
+        <View style={ui.row}>
+          <Text style={ui.title}>Your wearable</Text>
+          <Text style={[styles.badge, wearable.connected && styles.connected]}>{wearable.connected ? 'Connected' : 'Not connected'}</Text>
+        </View>
+        <Text style={ui.body}>{wearable.connected ? 'Keep your wearable nearby and powered on.' : 'Connect your wearable to receive distress signals.'}</Text>
+        <Link href="/wearable-setup" style={ui.link}>Manage connection</Link>
+      </View>
       <WearableMessage />
-    </View>
+      <View style={styles.navigation}>
+        {[
+          { href: '/tapping-pattern', title: 'Tapping pattern', detail: 'Choose the taps that signal you need help.' },
+          { href: '/emergency-contact', title: 'Emergency contacts', detail: 'Choose who receives your distress emails.' },
+          { href: '/location-sharing', title: 'Location sharing', detail: 'Share your location with a Google Maps link.' },
+        ].map(item => <Link key={item.href} href={item.href as '/tapping-pattern' | '/emergency-contact' | '/location-sharing'} asChild>
+          <Pressable accessibilityRole="link" style={({ pressed }) => [ui.card, styles.navigationCard, pressed && ui.pressed]}>
+            <View style={styles.navigationText}><Text style={ui.title}>{item.title}</Text><Text style={ui.body}>{item.detail}</Text></View>
+            <Text style={styles.chevron} accessibilityElementsHidden importantForAccessibility="no">›</Text>
+          </Pressable>
+        </Link>)}
+      </View>
+      <Text style={styles.mode}>Email alerts are currently in test mode.</Text>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 24, gap: 16, backgroundColor: '#FFFFFF' },
-  heading: { fontSize: 28, fontWeight: 'bold', marginTop: 24 },
-  description: { fontSize: 16, color: '#555555', marginBottom: 12 },
-  link: {
-    padding: 18,
-    borderRadius: 12,
-    backgroundColor: '#EAF2FF',
-    color: '#173B70',
-    fontSize: 17,
-    fontWeight: '600',
-  },
+  loading: { alignItems: 'center', justifyContent: 'center' },
+  intro: { gap: 10, paddingVertical: 8 },
+  brand: { color: '#173B70', fontSize: 12, fontWeight: '700', letterSpacing: 3 },
+  badge: { color: '#57657B', backgroundColor: '#EDF1F6', fontSize: 12, fontWeight: '600', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
+  connected: { color: '#176144', backgroundColor: '#E5F4EC' },
+  navigation: { gap: 12 },
+  navigationCard: { flexDirection: 'row', alignItems: 'center' },
+  navigationText: { flex: 1, gap: 6 },
+  chevron: { fontSize: 30, color: '#8A99AE' },
+  mode: { color: '#69788D', fontSize: 13, textAlign: 'center', lineHeight: 20 },
 });

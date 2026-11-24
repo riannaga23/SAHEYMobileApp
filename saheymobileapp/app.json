@@ -1,18 +1,20 @@
 {
   "expo": {
     "name": "Halo",
-    "slug": "saheymobileapp",
+    "slug": "halomobileapp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "saheymobileapp",
+    "scheme": "halomobileapp",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon"
     },
     "android": {
       "package": "com.halo.companion",
-      "permissions": ["android.permission.ACCESS_FINE_LOCATION"],
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -36,11 +38,14 @@
         }
       ],
       "expo-secure-store",
-      ["react-native-ble-manager", {
-        "neverForLocation": true,
-        "isBleRequired": false,
-        "bluetoothAlwaysPermission": "Allow Halo to connect to your safety wearable."
-      }],
+      [
+        "react-native-ble-manager",
+        {
+          "neverForLocation": true,
+          "isBleRequired": false,
+          "bluetoothAlwaysPermission": "Allow Halo to connect to your safety wearable."
+        }
+      ],
       "expo-image",
       "expo-status-bar",
       "expo-web-browser"

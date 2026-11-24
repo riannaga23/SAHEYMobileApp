@@ -1,16 +1,24 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'expo-router';
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { AppButton, ui } from '../components/ui/app-layout';
 import { useWearable } from '../hooks/use-wearable';
 import { WearableMessage } from '../components/wearable-message';
 import { bluetoothUnavailableReason, connectWearable, disconnectWearable, refreshRememberedWearable,
-  scanForWearables, skipWearableSetup, stopWearableScan, WEARABLE_NAME, matchesWearableName } from '../lib/wearable';
+  scanForWearables, skipWearableSetup, stopWearableScan, matchesWearableName } from '../lib/wearable';
 
 const labels = {
-  idle: 'Ready to search', permission: 'Checking permissions...', scanning: 'Searching nearby...',
-  connecting: 'Connecting and discovering services...', connected: 'Wearable connected',
-  disconnected: 'Wearable disconnected', error: 'Connection needs attention',
+  idle: 'Ready to connect', permission: 'Checking Bluetooth access…', scanning: 'Searching for your wearable…',
+  connecting: 'Connecting…', connected: 'Wearable connected', disconnected: 'Wearable disconnected', error: 'Connection needs attention',
 };
+function connectionError(message: string | null) {
+  if (!message) return '';
+  if (/permission|Nearby devices/i.test(message)) return 'Allow Bluetooth access in your phone’s app settings, then try again.';
+  if (/Turn on Bluetooth|Bluetooth is unavailable/i.test(message)) return 'Turn on Bluetooth and try again.';
+  if (/disconnected/i.test(message)) return 'Keep your wearable powered on and nearby, then reconnect.';
+  if (/timed out/i.test(message)) return 'The connection timed out. Keep your wearable nearby and try again.';
+  return 'Unable to connect to your wearable. Keep it nearby and try again.';
+}
 
 export default function WearableSetupScreen() {
   const router = useRouter();
@@ -19,6 +27,9 @@ export default function WearableSetupScreen() {
   const [leaving, setLeaving] = useState(false);
   const unavailable = bluetoothUnavailableReason();
   const busy = leaving || state.phase === 'permission' || state.phase === 'connecting';
+  const devices = state.devices.filter(device => matchesWearableName(device.name) || device.id === state.remembered?.id);
+  const error = pageError || connectionError(state.error);
+  const messagesUnavailable = !!state.connected && /No message notifications|Could not enable messages/.test(state.messageStatus);
   useEffect(() => {
     void refreshRememberedWearable();
     return () => { void stopWearableScan().catch(() => undefined); };
@@ -27,78 +38,48 @@ export default function WearableSetupScreen() {
   async function continueSetup() {
     setLeaving(true); setPageError('');
     try { await skipWearableSetup(); router.replace('/'); }
-    catch (error) { setPageError(error instanceof Error ? error.message : 'Could not save setup. Please try again.'); }
+    catch { setPageError('Could not finish setup. Please try again.'); }
     finally { setLeaving(false); }
   }
+  async function search() {
+    setPageError('');
+    try { if (state.phase === 'scanning') await stopWearableScan(); else await scanForWearables(); }
+    catch { setPageError('Unable to search right now. Please try again.'); }
+  }
 
-  return <ScrollView contentContainerStyle={styles.container}>
-    <Text style={styles.brand}>HALO WEARABLE</Text>
-    <Text style={styles.heading}>Connect your TinyS3</Text>
-    <Text style={styles.description}>Power on your wearable and keep it close to your phone. Search for nearby devices, then select {WEARABLE_NAME}.</Text>
-    <View style={styles.card} accessibilityLiveRegion="polite">
-      <Text style={styles.title}>{labels[state.phase]}</Text>
+  return <ScrollView style={ui.screen} contentContainerStyle={ui.content}>
+    <Text style={ui.heading}>Connect your wearable</Text>
+    <Text style={ui.body}>Power on your Halo wearable and keep it close to your phone.</Text>
+    <View style={ui.card} accessibilityLiveRegion="polite">
+      <Text style={ui.title}>{labels[state.phase]}</Text>
       {(busy || state.phase === 'scanning') && <ActivityIndicator color="#173B70" />}
-      {!!unavailable && <Text style={styles.description}>{unavailable}</Text>}
-      {!!(state.error || pageError) && <Text style={styles.error}>{pageError || state.error}</Text>}
+      {!!unavailable && <Text style={ui.body}>Wearable connection is available in the Halo Android app on a physical phone.</Text>}
+      {!!error && <Text style={ui.error} accessibilityRole="alert">{error}</Text>}
       {state.connected && <>
-        <Text style={styles.title}>{state.connected.name}</Text>
-        <Text style={styles.description}>Connection confirmed. {state.connected.services.length} BLE service(s) discovered.</Text>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={() => void disconnectWearable()}>
-          <Text style={styles.link}>Disconnect</Text>
-        </Pressable>
+        <Text style={ui.body}>{state.connected.name}</Text>
+        {messagesUnavailable && <Text style={ui.error}>Wearable alerts are unavailable. Disconnect and reconnect to try again.</Text>}
+        <AppButton secondary title="Disconnect" disabled={busy} onPress={() => { void disconnectWearable(); }} />
       </>}
     </View>
     <WearableMessage />
     {!unavailable && !state.connected && <>
-      <Pressable accessibilityRole="button" disabled={busy}
-        onPress={() => void (state.phase === 'scanning' ? stopWearableScan().catch(() => setPageError('Could not stop scanning. Try again.')) : scanForWearables())}
-        style={[styles.button, busy && styles.disabled]}>
-        <Text style={styles.buttonText}>{state.phase === 'scanning' ? 'Stop searching' : 'Search for my wearable'}</Text>
-      </Pressable>
-      {state.remembered && <View style={styles.card}>
-        <Text style={styles.title}>Saved wearable: {state.remembered.name}</Text>
-        <Text style={styles.description}>Remembered on this phone. A saved device is not necessarily connected.</Text>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={() => void connectWearable(state.remembered!)}>
-          <Text style={styles.link}>Reconnect saved wearable</Text>
-        </Pressable>
+      <AppButton title={state.phase === 'scanning' ? 'Stop searching' : 'Find my wearable'} disabled={busy} onPress={() => void search()} />
+      {state.remembered && <View style={ui.card}>
+        <Text style={ui.title}>Saved wearable</Text>
+        <Text style={ui.body}>{state.remembered.name}</Text>
+        <AppButton secondary title="Reconnect" disabled={busy} onPress={() => { void connectWearable(state.remembered!); }} />
       </View>}
-      <Text style={styles.title}>Nearby BLE devices</Text>
-      <Text style={styles.description}>Looking for {WEARABLE_NAME}. Matching names appear first. Select your board to connect.</Text>
-      {!state.devices.length && <Text style={styles.description}>{state.phase === 'scanning' ? 'Waiting for devices...' : 'No devices listed yet. Search with the board powered on and advertising BLE.'}</Text>}
-      {state.devices.map(device => <Pressable key={device.id} accessibilityRole="button"
-        accessibilityLabel={`Connect to ${device.name}`} disabled={busy || !device.connectable}
-        onPress={() => void connectWearable(device)} style={[styles.card, matchesWearableName(device.name) && styles.match, (busy || !device.connectable) && styles.disabled]}>
-        <Text style={styles.title}>{device.name}</Text>
-        {matchesWearableName(device.name) && <Text style={styles.link}>Name matches your Halo wearable</Text>}
-        <Text style={styles.description}>{device.id} · {device.rssi} dBm</Text>
-        <Text style={styles.link}>{device.connectable ? 'Connect' : 'Not connectable'}</Text>
+      <Text style={ui.title}>Nearby wearables</Text>
+      {!devices.length && <Text style={ui.body}>{state.phase === 'scanning' ? 'Keep your wearable nearby while we look for it.' : 'Tap Find my wearable to search.'}</Text>}
+      {devices.map(device => <Pressable key={device.id} accessibilityRole="button"
+        accessibilityLabel={`Connect to ${device.name}`} accessibilityState={{ disabled: busy || !device.connectable }} disabled={busy || !device.connectable}
+        onPress={() => { void connectWearable(device); }} style={({ pressed }) => [ui.card, (busy || !device.connectable) && ui.disabled, pressed && ui.pressed]}>
+        <Text style={ui.title}>{device.name}</Text>
+        <Text style={ui.link}>{device.connectable ? 'Connect' : 'Currently unavailable'}</Text>
       </Pressable>)}
     </>}
-    {!unavailable && <Pressable accessibilityRole="button" disabled={busy} onPress={() => void Linking.openSettings().catch(() => setPageError('Open Android Settings manually to check permissions.'))}>
-      <Text style={styles.link}>Open app permission settings</Text>
-    </Pressable>}
-    {state.remembered && <Pressable accessibilityRole="button" disabled={busy} onPress={() => void disconnectWearable(true)}>
-      <Text style={styles.link}>Forget saved wearable</Text>
-    </Pressable>}
-    <Pressable accessibilityRole="button" disabled={busy} onPress={() => void continueSetup()}
-      style={[state.connected ? styles.button : styles.secondary, busy && styles.disabled]}>
-      <Text style={state.connected ? styles.buttonText : styles.link}>{state.connected ? 'Continue to Halo' : 'Set up later'}</Text>
-    </Pressable>
-    <Text style={styles.description}>You can return to Wearable Connection from the home screen. Connecting does not send an alert.</Text>
+    {!unavailable && <AppButton secondary title="Bluetooth permissions" disabled={busy} onPress={() => { void Linking.openSettings().catch(() => setPageError('Open your phone’s app settings to allow Bluetooth access.')); }} />}
+    {state.remembered && <AppButton secondary title="Forget wearable" disabled={busy} onPress={() => { void disconnectWearable(true); }} />}
+    <AppButton title={state.connected ? 'Done' : 'Set up later'} disabled={busy} onPress={() => void continueSetup()} />
   </ScrollView>;
 }
-
-const styles = StyleSheet.create({
-  container: { flexGrow: 1, padding: 24, paddingBottom: 48, gap: 16, backgroundColor: '#FFFFFF' },
-  brand: { color: '#173B70', fontWeight: '700', letterSpacing: 2, fontSize: 12 },
-  heading: { color: '#17233C', fontSize: 28, fontWeight: 'bold' },
-  description: { color: '#555555', fontSize: 15, lineHeight: 22 },
-  card: { padding: 18, borderWidth: 1, borderColor: '#DCE4F0', borderRadius: 12, gap: 10, backgroundColor: '#F7F9FC' },
-  match: { borderColor: '#173B70', borderWidth: 2, backgroundColor: '#EAF2FF' },
-  title: { fontSize: 17, color: '#173B70', fontWeight: '600' },
-  button: { padding: 18, backgroundColor: '#173B70', borderRadius: 12, alignItems: 'center' },
-  buttonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600' },
-  secondary: { alignItems: 'center', padding: 10 },
-  link: { color: '#173B70', fontSize: 16, fontWeight: '600', paddingVertical: 6 },
-  disabled: { opacity: 0.5 }, error: { color: '#B00020', fontSize: 15, lineHeight: 22 },
-});

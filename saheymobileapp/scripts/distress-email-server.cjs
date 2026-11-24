@@ -6,6 +6,10 @@ const { configuration, createDistressEmailHandler } = require('../src/server/dis
 function createServer(options = {}) {
   const handle = createDistressEmailHandler(options);
   const server = http.createServer(async (req, res) => {
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ service: 'halo-distress-email', locationReportingVersion: 1 }));
+    }
     if (req.url !== '/distress' && req.url !== '/api/distress') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Not found' }));
@@ -34,12 +38,12 @@ if (require.main === module) {
   try {
     if (env.NODE_ENV !== 'development') throw new Error('This email server is for local development only.');
     configuration(env);
-    const port = Number(env.SAHEY_EMAIL_PORT || 8787);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('SAHEY_EMAIL_PORT must be between 1 and 65535.');
-    const host = env.SAHEY_EMAIL_HOST || '127.0.0.1';
+    const port = Number(env.HALO_EMAIL_PORT || 8787);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('HALO_EMAIL_PORT must be between 1 and 65535.');
+    const host = env.HALO_EMAIL_HOST || '127.0.0.1';
     const server = createServer({ env });
-    server.on('error', error => { console.error(`[SAHEY] Cannot start email server: ${error.message}`); process.exitCode = 1; });
-    server.listen(port, host, () => console.log(`[SAHEY] Test email server listening on ${host}:${port}`));
+    server.on('error', error => { console.error(`[HALO] Cannot start email server: ${error.message}`); process.exitCode = 1; });
+    server.listen(port, host, () => console.log(`[HALO] Test email server listening on ${host}:${port}`));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

@@ -1,5 +1,5 @@
 {
-  "name": "saheymobileapp",
+  "name": "halomobileapp",
   "version": "1.0.0",
   "main": "expo-router/entry",
   "dependencies": {
@@ -46,7 +46,10 @@
     "start:ble": "npm run start -- --dev-client --lan",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "email:server": "node --env-file=.env.local scripts/distress-email-server.cjs",
+    "test": "node --test scripts/test-*.cjs",
+    "typecheck": "tsc --noEmit"
   },
   "private": true
 }

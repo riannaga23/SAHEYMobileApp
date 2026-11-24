@@ -2,13 +2,56 @@
 const MAX_BODY_BYTES = 4096;
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+const LOCATION_UNAVAILABLE = {
+  'permission-denied': 'Location permission was not granted on the phone.',
+  'services-disabled': 'Location services were disabled on the phone.',
+  timeout: 'The phone could not obtain a location before the GPS timeout.',
+  unavailable: 'The phone could not obtain a location.',
+  'stale-location': 'The phone could not obtain a sufficiently recent location.',
+};
+
+function locationSnapshot(payload, occurredAt, now) {
+  const reason = payload.locationUnavailableReason;
+  if (reason !== undefined && (typeof reason !== 'string' || !Object.hasOwn(LOCATION_UNAVAILABLE, reason))) {
+    throw new Error('Invalid location-unavailable reason.');
+  }
+  if (payload.location === undefined || payload.location === null) {
+    return { location: null, locationUnavailableReason: reason || 'unavailable' };
+  }
+  const value = payload.location;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || reason !== undefined) throw new Error('Invalid phone location.');
+  const { latitude, longitude, acquiredAt, accuracyMeters, source } = value;
+  if (source !== undefined && source !== 'recent') throw new Error('Invalid phone location source.');
+  const timestamp = typeof acquiredAt === 'string' ? Date.parse(acquiredAt) : NaN;
+  // Validate freshness relative to this incident, not each retry. Its location
+  // snapshot and provider payload must stay identical if an acknowledgement is lost.
+  if (typeof latitude !== 'number' || !Number.isFinite(latitude) || Math.abs(latitude) > 90
+    || typeof longitude !== 'number' || !Number.isFinite(longitude) || Math.abs(longitude) > 180
+    || !Number.isFinite(timestamp) || timestamp < occurredAt - 60_000 || timestamp > occurredAt + 5 * 60_000 || timestamp > now + 10_000
+    || (accuracyMeters !== undefined && accuracyMeters !== null
+      && (typeof accuracyMeters !== 'number' || !Number.isFinite(accuracyMeters) || accuracyMeters < 0))) {
+    throw new Error('Phone location must contain valid coordinates, accuracy, and a GPS timestamp close to the distress signal.');
+  }
+  return { location: { latitude, longitude, acquiredAt: new Date(timestamp).toISOString(), accuracyMeters: accuracyMeters ?? null,
+    ...(source === 'recent' ? { source } : {}) } };
+}
+
+function locationText(snapshot) {
+  if (!snapshot.location) return `Phone location unavailable. ${LOCATION_UNAVAILABLE[snapshot.locationUnavailableReason]}`;
+  const { latitude, longitude, acquiredAt, accuracyMeters } = snapshot.location;
+  return (snapshot.location.source === 'recent' ? 'Recent phone location (last known position within one minute):\n' : 'Phone location near the distress signal:\n')
+    + `Latitude: ${latitude}\nLongitude: ${longitude}\n`
+    + `Google Maps: https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}\n`
+    + `GPS acquired: ${acquiredAt}`
+    + (accuracyMeters === null ? '' : `\nReported accuracy: approximately ${accuracyMeters} meters`);
+}
 
 function configuration(env) {
   const key = env.RESEND_API_KEY?.trim();
-  const from = env.SAHEY_FROM_EMAIL?.trim() || 'SAHEY Demo <onboarding@resend.dev>';
+  const from = env.HALO_FROM_EMAIL?.trim() || 'Halo <onboarding@resend.dev>';
   const sender = /^(?:[^<>\r\n]+<([^<>]+)>|([^<>]+))$/.exec(from);
   if (!key || !sender || !EMAIL.test((sender[1] || sender[2]).trim())) {
-    throw new Error('Configure RESEND_API_KEY and a valid SAHEY_FROM_EMAIL, then restart the server.');
+    throw new Error('Configure RESEND_API_KEY and a valid HALO_FROM_EMAIL, then restart the server.');
   }
   return { key, from };
 }
@@ -25,7 +68,7 @@ function providerFailure(response, result, config) {
   let error = `Resend rejected the email request (HTTP ${response.status}${code ? `, ${code}` : ''}).`;
   error += message ? ` ${message}` : ' Open the failed request in Resend API logs to see the validation details.';
   if (/only send testing|verify a domain|domain.*not verified/i.test(message)) {
-    error += ' Set SAHEY_FROM_EMAIL to an address on your verified Resend domain, or use onboarding@resend.dev with your Resend account email as the test recipient.';
+    error += ' Set HALO_FROM_EMAIL to an address on your verified Resend domain, or use onboarding@resend.dev with your Resend account email as the test recipient.';
   }
   return {
     error, retryable, delivery: retryable ? 'unconfirmed' : 'rejected',
@@ -81,7 +124,9 @@ function createDistressEmailHandler({ env = process.env, fetch: send = globalThi
         headers: {
           Authorization: `Bearer ${config.key}`,
           'Content-Type': 'application/json',
-          'Idempotency-Key': `sahey-distress/${record.eventId}`,
+          // Keep old incident keys stable during an upgrade to prevent resends.
+          'Idempotency-Key': record.eventId.startsWith('halo-distress-')
+            ? `halo-distress/${record.eventId}` : `sahey-distress/${record.eventId}`,
         },
         body: JSON.stringify(batch ? record.messages : record.messages[0]),
         signal: controller.signal,
@@ -95,7 +140,7 @@ function createDistressEmailHandler({ env = process.env, fetch: send = globalThi
         || !ids.every(id => typeof id === 'string' && id.length > 0) || new Set(ids).size !== ids.length) {
         return { status: 502, body: { error: 'The email provider did not confirm every email. Delivery is unconfirmed.', retryable: true } };
       }
-      record.result = { success: true, ids, accepted: ids.length };
+      record.result = { success: true, ids, accepted: ids.length, location: record.locationResult };
       return { status: 200, body: record.result };
     } catch {
       return { status: 502, body: { error: 'The email provider connection timed out or failed. Delivery is unconfirmed.', retryable: true } };
@@ -130,11 +175,14 @@ function createDistressEmailHandler({ env = process.env, fetch: send = globalThi
     if (recipients.some(email => /@(?:[^@]+\.)?example\.(?:com|net|org)$/i.test(email))) {
       return reply(400, { error: 'Replace placeholder email addresses in Emergency Contacts with real recipient addresses.', retryable: false });
     }
+    let phoneLocation;
+    try { phoneLocation = locationSnapshot(payload, occurredAt, now()); }
+    catch (error) { return reply(400, { error: error.message, retryable: false }); }
     let config;
     try { config = configuration(env); }
     catch (error) { return reply(503, { error: error.message, retryable: false }); }
 
-    const fingerprint = JSON.stringify({ occurredAt: new Date(occurredAt).toISOString(), recipients });
+    const fingerprint = JSON.stringify({ occurredAt: new Date(occurredAt).toISOString(), recipients, ...phoneLocation });
     for (const [id, record] of incidents) {
       if (!record.task && now() - record.createdAt >= RETENTION_MS) incidents.delete(id);
     }
@@ -150,11 +198,16 @@ function createDistressEmailHandler({ env = process.env, fetch: send = globalThi
       if (incidents.size >= 2048) return reply(503, { error: 'The email service is busy. Try again later.', retryable: false });
       record = {
         eventId: payload.eventId, fingerprint, createdAt: now(),
+        // Acknowledge what went into the accepted provider payload, including on retries.
+        locationResult: phoneLocation.location
+          ? { status: 'included', acquiredAt: phoneLocation.location.acquiredAt, source: phoneLocation.location.source || 'current' }
+          : { status: 'unavailable', reason: phoneLocation.locationUnavailableReason },
         // Keep the payload identical for every provider retry, including the time.
         messages: recipients.map(email => ({
-          from: config.from, to: [email], subject: '[TEST] SAHEY Distress Detected',
-          text: 'SAHEY received a CONFIRMED DISTRESS signal from the connected wearable.\n\n'
+          from: config.from, to: [email], subject: '[TEST] Halo Distress Signal',
+          text: 'Halo received a CONFIRMED DISTRESS signal from the connected wearable.\n\n'
             + `Time: ${new Date(occurredAt).toISOString()}\n\n`
+            + `${locationText(phoneLocation)}\n\n`
             + 'This is a development test, not a real emergency.',
         })),
       };

@@ -9,18 +9,15 @@ import {
   sendWearableCommand,
   subscribeWearable,
   getWearableSnapshot,
+  cancelWearableSetupSession,
+  isWearableSetupRecording,
 } from '../lib/wearable';
 
 const MIN_TAPS = 3;
-const PAUSE_MS = 2000;
-// The bracelet connection must emit this event once per physical tap.
-// No screen interaction emits it, and Bluetooth transport is not implemented here.
-// TODO BLE: The shared service should normalize the agreed firmware protocol here.
-// Handle "TAP #" totals from the bracelet; if firmware sends individual tap events,
-// increment once per received event instead. This event name is an internal app hook.
-const BRACELET_TAP_EVENT = 'sahey.bracelet.tap';
-const BRACELET_TOO_FEW_EVENT = 'sahey.bracelet.too-few';
-const BRACELET_PATTERN_SAVED_EVENT = 'sahey.bracelet.pattern-saved';
+// The shared Bluetooth service forwards cumulative tap counts from the bracelet.
+const BRACELET_TAP_EVENT = 'halo.bracelet.tap';
+const BRACELET_TOO_FEW_EVENT = 'halo.bracelet.too-few';
+const BRACELET_PATTERN_SAVED_EVENT = 'halo.bracelet.pattern-saved';
 type Phase = 'idle' | 'loading' | 'load-error' | 'recording' | 'too-few' | 'saving' | 'save-error' | 'saved';
 type Dialog = 'reset' | 'discard' | null;
 
@@ -57,11 +54,9 @@ export default function TappingPatternScreen() {
     setDialog(next);
   }
 
-  // TODO BLE: When starting setup, subscribe to bracelet notifications BEFORE
-  // sending "BEGIN SET UP", so the first tap can be received. After the command
-  // succeeds, clear the displayed count and show the recording state.
-  // Synchronize with the bracelet rather than treating the local cache as its state.
   const load = useCallback(async () => {
+    setupArmed.current = false;
+    cancelWearableSetupSession();
     phaseRef.current = 'loading';
     setPhase('loading');
     setError('');
@@ -69,8 +64,8 @@ export default function TappingPatternScreen() {
       const value = await loadTapCount();
       if (!mounted.current) return;
       savedCount.current = value;
-      draftCount.current = value ?? 0;
-      setCount(value ?? 0);
+      draftCount.current = 0;
+      setCount(value !== null && value >= MIN_TAPS ? value : 0);
       // Legacy counts below three remain in storage until a valid replacement is saved.
       const next: Phase = value === null? 'idle': value < MIN_TAPS? 'idle': 'saved';
       phaseRef.current = next;
@@ -88,13 +83,21 @@ export default function TappingPatternScreen() {
     mounted.current = true;
     void load();
     const subscription = AppState.addEventListener('change', (state) => {
-      // TODO BLE: Handle bracelet disconnection and command failures: show setup
-      // interrupted, never success. On reconnection, synchronize before resuming.
-      // AppState changes alone do not establish the bracelet's connection status.
-      if (state !== 'active') clearTimer();
+      if (state !== 'active') {
+        setupArmed.current = false;
+        cancelWearableSetupSession();
+        clearTimer();
+        if (phaseRef.current === 'recording') {
+          draftCount.current = 0;
+          setCount(0);
+          changePhase('idle');
+        }
+      }
     });
     return () => {
       mounted.current = false;
+      setupArmed.current = false;
+      cancelWearableSetupSession();
       clearTimer();
       subscription.remove();
     };
@@ -110,6 +113,7 @@ useEffect(() => {
       snapshot.phase !== 'connected'
     ) {
       setupArmed.current = false;
+      cancelWearableSetupSession();
       clearTimer();
       setError(
         'Wearable disconnected. Reconnect to restart setup.'
@@ -127,6 +131,7 @@ useEffect(() => {
 
   const exit = useCallback(() => {
   setupArmed.current = false;
+  cancelWearableSetupSession();
   clearTimer();
 
   if (router.canGoBack()) router.back();
@@ -145,7 +150,6 @@ useEffect(() => {
   useFocusEffect(useCallback(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       requestExit();
-      setupArmed.current = false;
       return true;
     });
     const braceletSubscription = DeviceEventEmitter.addListener(
@@ -162,6 +166,7 @@ const tooFewSubscription = DeviceEventEmitter.addListener(
     if (phaseRef.current !== 'recording') return;
 
     setupArmed.current = false;
+    cancelWearableSetupSession();
     clearTimer();
     changePhase('too-few');
   }
@@ -175,12 +180,20 @@ const patternSavedSubscription = DeviceEventEmitter.addListener(
 
     // Firmware has confirmed setup completion.
     setupArmed.current = false;
+    cancelWearableSetupSession();
 
     void finishPattern();
   }
 );
 
     return () => {
+      setupArmed.current = false;
+      cancelWearableSetupSession();
+      draftCount.current = 0;
+      if (mounted.current && phaseRef.current === 'recording') {
+        setCount(0);
+        changePhase('idle');
+      }
       clearTimer();
       subscription.remove();
       [braceletSubscription, tooFewSubscription, patternSavedSubscription].forEach(
@@ -192,7 +205,8 @@ const patternSavedSubscription = DeviceEventEmitter.addListener(
 const startingSetup = useRef(false);
 
 async function beginBraceletSetup() {
-  if (startingSetup.current || saving.current) return;
+  if (!mounted.current || AppState.currentState !== 'active'
+    || startingSetup.current || saving.current || setupArmed.current || dialogRef.current !== null) return;
 
   startingSetup.current = true;
   setupArmed.current = true;
@@ -205,16 +219,16 @@ async function beginBraceletSetup() {
 
   try {
     await sendWearableCommand('BEGIN SET UP');
-
-    console.log('[HALO] Wearable setup command written');
   } catch (error) {
     setupArmed.current = false;
+    cancelWearableSetupSession();
+    if (!mounted.current) return;
+    draftCount.current = 0;
+    setCount(0);
     changePhase('idle');
 
     setError(
-      error instanceof Error
-        ? error.message
-        : 'Could not begin wearable setup.'
+      'Unable to start recording. Check your wearable connection and try again.'
     );
   } finally {
     startingSetup.current = false;
@@ -222,14 +236,7 @@ async function beginBraceletSetup() {
 }
 
 
-  // TODO BLE: Handle "TOO FEW TAPS" from the bracelet. Show:
-  // "You must have at least 3 taps in your pattern."
-  // Keep Reset pattern available so the user can restart setup.
-  // TODO BLE: Handle "PATTERN SAVED", sent by the bracelet after 2 seconds of
-  // inactivity. Stop recording and retain the received count for the saved display.
-  // Replace the current phone-side inactivity timer/local auto-save flow with that
-  // confirmation. Do not infer a bracelet save merely because the count reaches 3.
-
+  // Saving starts only after the bracelet reports PATTERN SAVED.
 async function finishPattern() {
   clearTimer();
 
@@ -262,15 +269,11 @@ async function finishPattern() {
 
     savedCount.current = value;
     changePhase('saved');
-
-    console.log('[HALO] Detection mode command sent');
   } catch (error) {
     if (!mounted.current) return;
 
     setError(
-      error instanceof Error
-        ? error.message
-        : 'Could not complete wearable setup.'
+      'Unable to save your pattern. Please try again.'
     );
 
     changePhase('save-error');
@@ -280,10 +283,7 @@ async function finishPattern() {
 }
 
 
-  // TODO BLE: Handle "TAP #" notifications while recording. Update the displayed
-  // count using the total reported by the bracelet if the agreed protocol sends totals.
-
-
+  // Ignore counts unless the user explicitly started this screen's setup session.
 function receiveBraceletTap(count: number) {
   if (
     !mounted.current ||
@@ -295,6 +295,7 @@ function receiveBraceletTap(count: number) {
   // Never update the setup counter outside an active session.
   if (
     !setupArmed.current ||
+    !isWearableSetupRecording() ||
     phaseRef.current !== 'recording' ||
     dialogRef.current !== null
   ) {
@@ -307,20 +308,21 @@ function receiveBraceletTap(count: number) {
 
   draftCount.current = count;
   setCount(count);
-
-  console.log('[HALO] Setup tap count:', count);
 }
 
 
 
   braceletTapHandler.current = receiveBraceletTap;
 
-  // TODO BLE: Use this same restart handler whether a pattern is saved, recording
-  // is in progress, or setup was rejected. On confirmation of "Set new pattern",
-  // send "BEGIN SET UP". Clear the count and return to recording only after success.
-  async function resetPattern() {
+  // Reset prepares a new pattern; only the Begin button arms recording.
+  function resetPattern() {
+    setupArmed.current = false;
+    cancelWearableSetupSession();
     showDialog(null);
-    await beginBraceletSetup();
+    draftCount.current = 0;
+    setCount(0);
+    setError('');
+    changePhase('idle');
   }
 
   function closeDialog() {
@@ -331,10 +333,12 @@ function receiveBraceletTap(count: number) {
   const isSaved = phase === 'saved';
   const title = isSaved ? 'Tapping pattern saved' : phase === 'too-few' ? 'Try your pattern again' : 'Create your pattern';
   const description = isSaved ? 'Your tap count has been saved on this device.'
-    : phase === 'too-few' ? 'Reset your pattern to try again.'
+    : phase === 'idle' || phase === 'too-few' ? 'Press Begin wearable setup when you are ready to record your tapping pattern.'
       : 'Tap your pattern on your bracelet. Pause for 2 seconds when you’re finished.\nUse at least 3 taps.';
   const status = isSaved ? 'Pattern saved ✓' : phase === 'too-few' ? 'Pattern not saved'
-    : phase === 'saving' ? 'Saving pattern…' : phase === 'save-error' ? 'Pattern not saved' : count > 0 ? 'Recording from bracelet' : 'Waiting for bracelet taps';
+    : phase === 'saving' ? 'Saving pattern…' : phase === 'save-error' ? 'Pattern not saved'
+    : phase === 'recording' ? (count > 0 ? 'Recording from bracelet' : 'Waiting for bracelet taps')
+    : 'Press Begin wearable setup to start';
 
   return (
     <>
@@ -382,7 +386,7 @@ function receiveBraceletTap(count: number) {
             <View testID="tap-count" accessible accessibilityRole="text"
               accessibilityLabel={`Taps received: ${count}. ${status}`}
               style={styles.countCard}>
-              <Text style={styles.cardTitle}>Taps received</Text>
+              <Text style={styles.cardTitle}>{isSaved ? 'Saved taps' : 'Taps received'}</Text>
               <Text style={styles.count}>{count}</Text>
               <Text style={styles.status} accessibilityLiveRegion="polite">{status}</Text>
             </View>
@@ -392,7 +396,7 @@ function receiveBraceletTap(count: number) {
               <Button
                 label="Begin wearable setup"
                 onPress={() => void beginBraceletSetup()}
-                disabled={busy}
+                disabled={busy || phase === 'recording'}
               />
               {!!error && phase !== 'save-error' && (
                 <Text style={styles.error}>{error}</Text>
@@ -409,7 +413,7 @@ function receiveBraceletTap(count: number) {
             <Text style={styles.dialogTitle} accessibilityRole="header">{dialog === 'discard' ? 'Leave setup?' : 'Set a new pattern?'}</Text>
             <Text style={styles.dialogMessage}>{dialog === 'discard'
               ? `Your new taps have not been saved.${savedCount.current !== null ? ' Your previous count will stay saved.' : ''}`
-              : 'Start recording a new tapping pattern. Your previous count stays saved until the new pattern is saved.'}</Text>
+              : 'Prepare a new tapping pattern, then press Begin wearable setup to record it. Your previous count stays saved until the new pattern is saved.'}</Text>
             <View style={styles.row}>
               <Button label={dialog === 'discard' ? 'Keep editing' : 'Cancel'} secondary onPress={closeDialog} />
               <Button
@@ -444,8 +448,8 @@ function Button({ label, onPress, secondary = false, quiet = false, disabled = f
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#FFFFFF' },
-  container: { flexGrow: 1, padding: 24, paddingTop: 28 },
+  screen: { flex: 1, backgroundColor: '#F5F7FB' },
+  container: { flexGrow: 1, width: '100%', maxWidth: 640, alignSelf: 'center', padding: 24, paddingTop: 28 },
   intro: { minHeight: 190 },
   heading: { fontSize: 26, fontWeight: '700', color: '#091C57', marginBottom: 12 },
   description: { fontSize: 17, lineHeight: 24, color: '#091C57' },

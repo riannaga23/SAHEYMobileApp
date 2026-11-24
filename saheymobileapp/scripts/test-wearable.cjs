@@ -1,68 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const ts = require('typescript');
-const HALO_SERVICE_UUID =
-  '7d31d9c0-54fa-4b79-9e15-68ddc5fb7401';
+const { fixture } = require('./helpers/wearable-fixture.cjs');
 
-const HALO_NOTIFY_UUID =
-  '7d31d9c0-54fa-4b79-9e15-68ddc5fb7402';
-
-function fixture(options = {}) {
-  const storage = options.storage || new Map();
-  const events = {};
-  const calls = { nativeImports: 0, connects: 0, disconnects: 0, scans: 0, notifications: [], emitted: [] };
-  const native = {
-    start: async () => {}, checkState: async () => options.bluetoothOff ? 'off' : 'on',
-    scan: async scan => { calls.scans++; assert.equal(scan.seconds, 15); assert.equal(scan.serviceUUIDs.length, 0); },
-    stopScan: async () => events.stop?.({ status: 0 }),
-    connect: async () => { calls.connects++; if (options.connectPromise) await options.connectPromise; if (options.failConnect) throw new Error('Board unreachable'); },
-    retrieveServices: async () => ({ name: 'Halo-TinyS3', services: options.noServices ? [] : [{ uuid: 'test-service' }], characteristics: options.characteristics ?? [] }),
-    startNotification: async (...args) => { calls.notifications.push(args); if (options.failNotify) throw new Error('Subscription failed'); },
-    onDidUpdateValueForCharacteristic: cb => { events.value = cb; return { remove() {} }; },
-    disconnect: async id => { calls.disconnects++; events.disconnect?.({ peripheral: id }); },
-    onDiscoverPeripheral: cb => { events.discover = cb; return { remove() {} }; },
-    onStopScan: cb => { events.stop = cb; return { remove() {} }; },
-    onDisconnectPeripheral: cb => { events.disconnect = cb; return { remove() {} }; },
-    onDidUpdateState: cb => { events.state = cb; return { remove() {} }; },
-  };
-  const mocks = {
-    'expo-constants': { __esModule: true, default: { executionEnvironment: options.expoGo ? 'storeClient' : 'bare' } },
-    'expo-device': { isDevice: !options.emulator },
-    'expo-secure-store': { getItemAsync: async key => storage.get(key) ?? null, setItemAsync: async (key, value) => storage.set(key, value) },
-    'react-native': {
-      DeviceEventEmitter: { emit: (...args) => calls.emitted.push(args) },
-      Platform: { OS: 'android', Version: options.androidVersion || 35 },
-      PermissionsAndroid: {
-        PERMISSIONS: { BLUETOOTH_SCAN: 'scan', BLUETOOTH_CONNECT: 'connect', ACCESS_FINE_LOCATION: 'location' }, RESULTS: { GRANTED: 'granted' },
-        requestMultiple: async permissions => Object.fromEntries(permissions.map(p => [p, options.denied ? 'denied' : 'granted'])),
-      },
-    },
-  };
-  const cache = new Map();
-  function load(file) {
-    file = path.resolve(__dirname, '..', file);
-    if (!path.extname(file)) file += '.ts';
-    if (cache.has(file)) return cache.get(file).exports;
-    const module = { exports: {} }; cache.set(file, module);
-    const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-    vm.runInNewContext(code, {
-      module, exports: module.exports, console,
-      setTimeout: (callback, ms) => setTimeout(callback, options.fastTimeout && ms === 20_000 ? 1 : ms), clearTimeout,
-      require: name => {
-        if (name === 'react-native-ble-manager') { calls.nativeImports++; return { default: native }; }
-        if (name in mocks) return mocks[name];
-        if (name.startsWith('.')) return load(path.resolve(path.dirname(file), name));
-        throw new Error(`Unexpected import ${name}`);
-      },
-    }, { filename: file });
-    return module.exports;
-  }
-  return { service: load('src/lib/wearable.ts'), settings: load('src/lib/wearableStorage.ts'), events, calls, storage };
-}
 const board = { id: 'AA:BB:CC:DD:EE:FF', name: 'Halo-TinyS3' };
+
+test('saved tap patterns migrate to Halo storage on Android and web without overwriting newer values', async () => {
+  for (const os of ['android', 'web']) {
+    const storage = new Map([['sahey.tapping-pattern-count', '4']]);
+    const f = fixture({ os, storage });
+    const patterns = f.load('src/lib/tappingPattern.ts');
+    assert.equal(await patterns.loadTapCount(), 4);
+    assert.equal(storage.get('halo.tapping-pattern-count'), '4');
+    await patterns.saveTapCount(6);
+    assert.equal(await patterns.loadTapCount(), 6);
+    assert.equal(storage.get('sahey.tapping-pattern-count'), '4');
+  }
+});
 
 test('first run is shown until explicitly skipped; skip survives app restart', async () => {
   const f = fixture();
@@ -197,7 +150,7 @@ test('subscribes to notifications and receives distress text only from the selec
     f.service.getWearableSnapshot().message.receivedAt > 0
   );
   assert.equal(f.calls.emitted.length, 1);
-  assert.equal(f.calls.emitted[0][0], 'sahey.distress.confirmed');
+  assert.equal(f.calls.emitted[0][0], 'halo.distress.confirmed');
   assert.equal(f.calls.emitted[0][1].deviceId, board.id);
   assert.equal(f.calls.emitted[0][1].receivedAt, f.service.getWearableSnapshot().message.receivedAt);
 
@@ -224,14 +177,14 @@ test('only complete confirmed distress messages emit email events', async () => 
   }
   f.events.value({ ...notification('CONFIRMEDDISTRESS'), peripheral: 'OTHER' });
   f.events.value({ ...notification('CONFIRMEDDISTRESS'), characteristic: 'OTHER' });
-  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 0);
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'halo.distress.confirmed').length, 0);
   for (const text of ['CONFIRMEDDISTRESS', 'Confirmed distress\0', 'CONFIRMED_DISTRESS', 'confirmed-distress']) {
     f.events.value(notification(text));
   }
-  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 4);
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'halo.distress.confirmed').length, 4);
   f.events.disconnect({ peripheral: board.id });
   f.events.value(notification('CONFIRMEDDISTRESS'));
-  assert.equal(f.calls.emitted.filter(event => event[0] === 'sahey.distress.confirmed').length, 4);
+  assert.equal(f.calls.emitted.filter(event => event[0] === 'halo.distress.confirmed').length, 4);
 });
 
 
@@ -244,4 +197,118 @@ test('missing or failed notifications keep connection but explain message availa
     f.events.value(notification('CONFIRMEDDISTRESS'));
     assert.equal(f.service.getWearableSnapshot().message, null);
   }
+});
+
+test('idle tap and setup-result notifications never update backend state or emit UI events', async () => {
+  const f = fixture({ characteristics: [messageCharacteristic] });
+  await f.service.connectWearable(board);
+  const original = f.service.getWearableSnapshot();
+  for (const text of ['TAP 1', 'TAP 8', 'TAP -1', 'TOO FEW TAPS', 'PATTERN SAVED']) f.events.value(notification(text));
+  assert.equal(f.service.getWearableSnapshot(), original);
+  assert.deepEqual(f.calls.emitted, []);
+  assert.equal(f.service.isWearableSetupRecording(), false);
+  f.events.value(notification('CONFIRMEDDISTRESS'));
+  assert.equal(f.calls.emitted[0][0], 'halo.distress.confirmed');
+});
+
+test('only a successful Begin command opens the backend tap gate and cancellation closes it', async () => {
+  const f = fixture({ characteristics: [messageCharacteristic] });
+  await f.service.connectWearable(board);
+  await f.service.sendWearableCommand('BEGIN SET UP');
+  assert.equal(Buffer.from(f.calls.writes[0][3]).toString(), 'BEGIN SET UP');
+  assert.equal(f.calls.writes[0][2], '7d31d9c0-54fa-4b79-9e15-68ddc5fb7403');
+  assert.equal(f.service.isWearableSetupRecording(), true);
+  f.events.value(notification('TAP 2'));
+  assert.equal(f.service.getWearableSnapshot().message.text, 'TAP 2');
+  assert.deepEqual(f.calls.emitted, [['halo.bracelet.tap', 2]]);
+  f.service.cancelWearableSetupSession();
+  assert.equal(f.service.getWearableSnapshot().message, null);
+  const original = f.service.getWearableSnapshot();
+  f.events.value(notification('TAP 3'));
+  assert.equal(f.service.getWearableSnapshot(), original);
+  assert.equal(f.calls.emitted.length, 1);
+  await f.service.sendWearableCommand('BEGIN SET UP');
+  f.events.value(notification('TAP 1'));
+  assert.equal(f.calls.emitted.at(-1)[1], 1);
+});
+
+test('notifications received during a command write are published only on success', async () => {
+  for (const failWrite of [false, true]) {
+    let release;
+    const f = fixture({ characteristics: [messageCharacteristic], failWrite,
+      writePromise: new Promise(resolve => { release = resolve; }) });
+    await f.service.connectWearable(board);
+    const command = f.service.sendWearableCommand('BEGIN SET UP');
+    const rejected = failWrite ? assert.rejects(command, /Command write failed/) : null;
+    await new Promise(resolve => setImmediate(resolve));
+    f.events.value(notification('TAP 1'));
+    f.events.value(notification('TAP 3'));
+    assert.equal(f.service.isWearableSetupRecording(), false);
+    assert.equal(f.service.getWearableSnapshot().message, null);
+    assert.equal(f.calls.emitted.length, 0);
+    release();
+    if (rejected) await rejected; else await command;
+    assert.equal(f.service.isWearableSetupRecording(), !failWrite);
+    assert.equal(f.service.getWearableSnapshot().message?.text ?? null, failWrite ? null : 'TAP 3');
+    assert.equal(f.calls.emitted.length, failWrite ? 0 : 1);
+  }
+});
+
+test('cancelling a pending Begin cannot write or reopen a setup session afterward', async () => {
+  for (const stage of ['permission', 'write']) {
+    const options = { characteristics: [messageCharacteristic] };
+    const f = fixture(options);
+    await f.service.connectWearable(board);
+    let release;
+    options[stage === 'permission' ? 'permissionPromise' : 'writePromise'] = new Promise(resolve => { release = resolve; });
+    const command = f.service.sendWearableCommand('BEGIN SET UP');
+    const rejected = assert.rejects(command, /cancelled/);
+    await new Promise(resolve => setImmediate(resolve));
+    f.events.value(notification('TAP 2'));
+    f.service.cancelWearableSetupSession();
+    release(); await rejected;
+    f.events.value(notification('TAP 9'));
+    assert.equal(f.service.isWearableSetupRecording(), false);
+    assert.equal(f.service.getWearableSnapshot().message, null);
+    assert.equal(f.calls.emitted.length, 0);
+    assert.equal(f.calls.writes.length, stage === 'permission' ? 0 : 1);
+  }
+});
+
+test('firmware completion, detection mode and Bluetooth loss all require a new Begin', async () => {
+  for (const ending of ['PATTERN SAVED', 'TOO FEW TAPS', 'DETECTION MODE', 'disconnect', 'bluetooth-off']) {
+    const f = fixture({ characteristics: [messageCharacteristic] });
+    await f.service.connectWearable(board);
+    await f.service.sendWearableCommand('BEGIN SET UP');
+    f.events.value(notification('TAP 3'));
+    if (ending === 'disconnect') f.events.disconnect({ peripheral: board.id });
+    else if (ending === 'bluetooth-off') f.events.state({ state: 'off' });
+    else if (ending === 'DETECTION MODE') await f.service.sendWearableCommand(ending);
+    else f.events.value(notification(ending));
+    const original = f.service.getWearableSnapshot();
+    const count = f.calls.emitted.length;
+    f.events.value(notification('TAP 4'));
+    assert.equal(f.service.getWearableSnapshot(), original);
+    assert.equal(f.calls.emitted.length, count);
+    assert.equal(f.service.isWearableSetupRecording(), false);
+    if (ending === 'disconnect' || ending === 'bluetooth-off') {
+      await f.service.connectWearable(board);
+      f.events.value(notification('TAP 7'));
+      assert.equal(f.service.getWearableSnapshot().message, null);
+      assert.equal(f.calls.emitted.length, count);
+    }
+  }
+});
+
+test('an immediate completed pattern during the Begin write is buffered and emitted once', async () => {
+  const f = fixture({ characteristics: [messageCharacteristic], onWrite: events => {
+    events.value(notification('TAP 3'));
+    events.value(notification('PATTERN SAVED'));
+    events.value(notification('TAP 4'));
+  } });
+  await f.service.connectWearable(board);
+  await f.service.sendWearableCommand('BEGIN SET UP');
+  assert.deepEqual(f.calls.emitted, [['halo.bracelet.tap', 3], ['halo.bracelet.pattern-saved']]);
+  assert.equal(f.service.getWearableSnapshot().message.text, 'PATTERN SAVED');
+  assert.equal(f.service.isWearableSetupRecording(), false);
 });

@@ -8,8 +8,8 @@ const { createDistressEmailHandler, configuration } = require('../src/server/dis
 const { createServer } = require('./distress-email-server.cjs');
 
 const NOW = Date.now();
-const ENV = { NODE_ENV: 'development', RESEND_API_KEY: 'test-key', SAHEY_FROM_EMAIL: 'Halo <alerts@example.com>', SAHEY_TEST_RECIPIENTS: 'one@recipient.test' };
-const payload = (overrides = {}) => ({ type: 'CONFIRMED_DISTRESS', eventId: 'distress-event-123', occurredAt: new Date(NOW).toISOString(), to: ['one@recipient.test'], ...overrides });
+const ENV = { NODE_ENV: 'development', RESEND_API_KEY: 'test-key', HALO_FROM_EMAIL: 'Halo <alerts@example.com>', HALO_TEST_RECIPIENTS: 'one@recipient.test' };
+const payload = (overrides = {}) => ({ type: 'CONFIRMED_DISTRESS', eventId: 'halo-distress-event-123', occurredAt: new Date(NOW).toISOString(), to: ['one@recipient.test'], ...overrides });
 const request = (value = payload(), headers = {}) => new Request('http://localhost/api/distress', {
   method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value),
 });
@@ -24,10 +24,10 @@ function serverFixture(options = {}) {
 }
 
 test('server requires sender credentials and ignores obsolete configured recipient lists', () => {
-  assert.deepEqual(configuration(ENV), { key: ENV.RESEND_API_KEY, from: ENV.SAHEY_FROM_EMAIL });
-  assert.equal(configuration({ RESEND_API_KEY: 'key' }).from, 'SAHEY Demo <onboarding@resend.dev>');
-  assert.equal(configuration({ ...ENV, SAHEY_TEST_RECIPIENTS: 'invalid', SAHEY_TEST_EMAIL: 'your-address@example.com' }).key, ENV.RESEND_API_KEY);
-  for (const env of [{}, { ...ENV, RESEND_API_KEY: '' }, { ...ENV, SAHEY_FROM_EMAIL: 'not an address' }]) {
+  assert.deepEqual(configuration(ENV), { key: ENV.RESEND_API_KEY, from: ENV.HALO_FROM_EMAIL });
+  assert.equal(configuration({ RESEND_API_KEY: 'key' }).from, 'Halo <onboarding@resend.dev>');
+  assert.equal(configuration({ ...ENV, HALO_TEST_RECIPIENTS: 'invalid', HALO_TEST_EMAIL: 'your-address@example.com' }).key, ENV.RESEND_API_KEY);
+  for (const env of [{}, { ...ENV, RESEND_API_KEY: '' }, { ...ENV, HALO_FROM_EMAIL: 'not an address' }]) {
     assert.throws(() => configuration(env), /Configure/);
   }
 });
@@ -69,19 +69,22 @@ test('uses saved contact recipients from the app and only confirms a provider em
   const response = await f.handle(request(payload({ to: ['saved-contact@recipient.test'] })));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), { success: true, ids: ['email-123'], accepted: 1 });
+  assert.deepEqual(await response.json(), { success: true, ids: ['email-123'], accepted: 1, location: { status: 'unavailable', reason: 'unavailable' } });
   const body = JSON.parse(f.calls[0].body);
   assert.deepEqual(body.to, ['saved-contact@recipient.test']);
-  assert.equal(body.from, ENV.SAHEY_FROM_EMAIL);
+  assert.equal(body.from, ENV.HALO_FROM_EMAIL);
   assert.match(body.text, /development test/);
   assert.match(body.text, new RegExp(payload().occurredAt.replace(/[.]/g, '\\.')));
-  assert.equal(f.calls[0].headers['Idempotency-Key'], 'sahey-distress/distress-event-123');
+  assert.equal(f.calls[0].headers['Idempotency-Key'], 'halo-distress/halo-distress-event-123');
+  assert.equal(body.subject, '[TEST] Halo Distress Signal');
+  assert.match(body.text, /^Halo received a CONFIRMED DISTRESS signal/);
+  assert.doesNotMatch([body.from, body.subject, body.text].join('\n'), /sahey/i);
 });
 
 test('multiple recipients get private messages in a single batch', async () => {
   let sent;
   const f = serverFixture({
-    env: { ...ENV, SAHEY_TEST_RECIPIENTS: 'obsolete@example.com' },
+    env: { ...ENV, HALO_TEST_RECIPIENTS: 'obsolete@example.com' },
     fetch: async (url, init) => { sent = { url, body: JSON.parse(init.body) }; return Response.json({ data: [{ id: 'one' }, { id: 'two' }] }); },
   });
   assert.equal((await f.handle(request(payload({ to: ['one@recipient.test', 'two@recipient.test'] })))).status, 200);
@@ -183,17 +186,18 @@ test('provider errors, malformed responses and missing IDs never report success'
   assert.match((await (await f.handle(request())).json()).error, /verified Resend domain/);
 });
 
-test('HTTP 422 returns the specific provider validation reason without retrying or exposing a key', async () => {
+test('HTTP 422 keeps validation details internally and shows a plain-language alert without retrying', async () => {
   for (const nested of [false, true]) {
     const detail = { name: 'validation_error', message: 'Invalid `from` field. Use email@example.com or Name <email@example.com>.' };
     const server = serverFixture({ fetch: async () => Response.json(nested ? { error: detail } : detail, { status: 422 }) });
     const f = clientFixture({ fetch: async (url, init) => server.handle(new Request(url, init)) });
     await f.service.sendConfirmedDistressEmail(f.signal());
     assert.equal(f.calls.length, 1);
-    assert.equal(f.alerts[0][0], 'Distress email rejected');
-    assert.match(f.alerts[0][1], /HTTP 422, validation_error/);
-    assert.match(f.alerts[0][1], /Invalid `from` field/);
-    assert.doesNotMatch(f.alerts[0][1], /Check the server and connection/);
+    assert.equal(f.alerts[0][0], 'Alert not confirmed');
+    assert.match(f.service.getDistressEmailStatus().message, /HTTP 422, validation_error/);
+    assert.match(f.service.getDistressEmailStatus().message, /Invalid `from` field/);
+    assert.match(f.alerts[0][1], /email service could not accept/i);
+    assert.doesNotMatch(f.alerts[0][1], /HTTP|validation_error|Invalid `from`|Check the server and connection/);
   }
   const f = serverFixture({ fetch: async () => Response.json({ name: 'validation_error', message: `Invalid value: ${ENV.RESEND_API_KEY} or re_secret123` }, { status: 422 }) });
   const body = await (await f.handle(request())).json();
@@ -226,6 +230,7 @@ test('standalone adapter serves the same validated flow without a real email', a
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}`;
+  assert.deepEqual(await (await fetch(`${base}/health`)).json(), { service: 'halo-distress-email', locationReportingVersion: 1 });
   const response = await fetch(`${base}/distress`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload()) });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).ids[0], 'adapter-id');
@@ -237,8 +242,9 @@ function clientFixture(options = {}) {
   const calls = [];
   const alerts = [];
   const cache = new Map();
-  const storage = options.storage || new Map([['sahey.emergency-contacts-email', JSON.stringify(options.contacts ?? [{ name: 'One', email: 'one@recipient.test' }])]]);
+  const storage = options.storage || new Map([['halo.emergency-contacts-email', JSON.stringify(options.contacts ?? [{ name: 'One', email: 'one@recipient.test' }])]]);
   let currentTime = NOW;
+  const locationCalls = { permissionChecks: 0, permissionRequests: 0, servicesChecks: 0, positions: 0, recentPositions: 0 };
   class Clock extends Date { static now() { return currentTime; } }
   function load(file) {
     file = path.resolve(__dirname, '..', file);
@@ -247,14 +253,47 @@ function clientFixture(options = {}) {
     const module = { exports: {} }; cache.set(file, module);
     const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
     vm.runInNewContext(code, {
-      module, exports: module.exports, console, URL, AbortController, Date: Clock,
+      module, exports: module.exports, console, URL, AbortController, Date: Clock, __DEV__: false,
       process: { env: options.env ?? { EXPO_PUBLIC_API_URL: 'http://dev-host:8083/' } },
-      setTimeout: (callback, ms) => setTimeout(callback, ms === 15_000 ? (options.timeoutMs ?? ms) : 0), clearTimeout,
-      fetch: async (...args) => { calls.push(args); return options.fetch ? options.fetch(...args) : Response.json({ success: true, ids: JSON.parse(args[1].body).to.map((_, n) => `client-email-id-${n}`) }); },
+      setTimeout: (callback, ms) => options.scheduleTimeout ? options.scheduleTimeout(callback, ms)
+        : setTimeout(callback, ms === 15_000 ? (options.timeoutMs ?? ms) : ms === 12_000 ? 40 : ms === 8_000 ? 5 : ms === 60_000 ? 80 : ms === 45_000 ? 45 : 0),
+      clearTimeout: timer => options.cancelTimeout ? options.cancelTimeout(timer) : clearTimeout(timer),
+      fetch: async (...args) => {
+        calls.push(args);
+        if (options.fetch) return options.fetch(...args);
+        const body = JSON.parse(args[1].body);
+        return Response.json({ success: true, ids: body.to.map((_, n) => `client-email-id-${n}`), location: body.location
+          ? { status: 'included', acquiredAt: body.location.acquiredAt, source: body.location.source || 'current' }
+          : { status: 'unavailable', reason: body.locationUnavailableReason } });
+      },
       require: name => {
         if (name === 'react-native') return { Alert: { alert: (...args) => alerts.push(args) }, DeviceEventEmitter: options.emitter };
         if (name === 'expo-constants') return { __esModule: true, default: { expoConfig: { hostUri: options.hostUri } } };
         if (name === 'expo-device') return { isDevice: options.isDevice ?? true };
+        if (name === 'expo-location') return {
+          Accuracy: { High: 4, Balanced: 3 },
+          getForegroundPermissionsAsync: async () => {
+            locationCalls.permissionChecks++;
+            return options.permissionCheck ? options.permissionCheck() : (options.permission ?? { granted: true, canAskAgain: true });
+          },
+          requestForegroundPermissionsAsync: async () => {
+            locationCalls.permissionRequests++;
+            return options.requestPermission ? options.requestPermission() : (options.requestedPermission ?? { granted: true, canAskAgain: true });
+          },
+          hasServicesEnabledAsync: async () => { locationCalls.servicesChecks++; return options.servicesEnabled ?? true; },
+          getCurrentPositionAsync: async config => {
+            locationCalls.positions++;
+            assert.equal(config.accuracy, options.sharing ? 4 : 3);
+            assert.equal(config.mayShowUserSettingsDialog, options.sharing === true);
+            if (options.getPosition) return options.getPosition();
+            return options.position ?? { coords: { latitude: 40.7128, longitude: -74.006, accuracy: 12 }, timestamp: currentTime };
+          },
+          getLastKnownPositionAsync: async config => {
+            locationCalls.recentPositions++;
+            assert.deepEqual(JSON.parse(JSON.stringify(config)), { maxAge: 60000, requiredAccuracy: 1000 });
+            return options.getRecentPosition ? options.getRecentPosition() : (options.recentPosition ?? null);
+          },
+        };
         if (name === 'expo-secure-store') return {
           getItemAsync: async key => { if (options.failStorage) throw new Error('Could not read emergency contacts.'); return storage.get(key) ?? null; },
           setItemAsync: async (key, value) => storage.set(key, value),
@@ -267,7 +306,7 @@ function clientFixture(options = {}) {
     return module.exports;
   }
   const service = load('src/lib/distressEmail.ts');
-  return { service, calls, alerts, load, options, storage, advance(ms) { currentTime += ms; }, signal: () => ({ deviceId: 'BOARD', receivedAt: currentTime }) };
+  return { service, calls, alerts, load, options, storage, locationCalls, advance(ms) { currentTime += ms; }, signal: () => ({ deviceId: 'BOARD', receivedAt: currentTime }) };
 }
 
 test('app sends to the configured API and suppresses concurrent and recent duplicate signals', async () => {
@@ -312,7 +351,75 @@ test('app never treats invalid or unsuccessful server responses as accepted', as
     await f.service.sendConfirmedDistressEmail(f.signal());
     assert.equal(f.service.getDistressEmailStatus().phase, 'failed');
     assert.equal(f.alerts.length, 1);
-    assert.equal(f.alerts[0][0], 'Distress email not confirmed');
+    assert.equal(f.alerts[0][0], 'Alert not confirmed');
+  }
+});
+
+test('plain-text Not found reports the missing route once instead of a JSON parse error', async () => {
+  const f = clientFixture({ fetch: async () => new Response('Not found', { status: 404, headers: { 'Content-Type': 'text/plain' } }) });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.service.getDistressEmailStatus().phase, 'failed');
+  assert.match(f.service.getDistressEmailStatus().message, /endpoint was not found \(HTTP 404\)/);
+  assert.match(f.service.getDistressEmailStatus().message, /EXPO_PUBLIC_DISTRESS_EMAIL_URL/);
+  assert.match(f.alerts[0][1], /alert service is unavailable/i);
+  assert.doesNotMatch(f.alerts[0][1], /parse error|Unexpected|SyntaxError/i);
+});
+
+test('HTML, empty and malformed success responses never confirm email delivery', async () => {
+  for (const [response, expected] of [
+    [() => new Response('<html>Gateway failure re_secret123</html>', { status: 502 }), /non-JSON response \(HTTP 502\)/],
+    [() => new Response(null, { status: 204 }), /empty response \(HTTP 204\)/],
+    [() => new Response('Not JSON', { status: 200 }), /non-JSON response \(HTTP 200\)/],
+    [() => new Response('{broken', { status: 200, headers: { 'Content-Type': 'application/json' } }), /non-JSON response \(HTTP 200\)/],
+  ]) {
+    const f = clientFixture({ fetch: async () => response() });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.equal(f.calls.length, 3);
+    assert.equal(new Set(f.calls.map(call => call[1].body)).size, 1);
+    assert.equal(f.service.getDistressEmailStatus().phase, 'failed');
+    assert.match(f.service.getDistressEmailStatus().message, expected);
+    assert.doesNotMatch(f.alerts[0][1], /SyntaxError|parse error|re_secret123|<html>/i);
+  }
+});
+
+test('a temporary non-JSON gateway response retries the same incident and can recover', async () => {
+  let count = 0;
+  const f = clientFixture({ fetch: async () => ++count === 1
+    ? new Response('Service unavailable', { status: 503 })
+    : Response.json({ success: true, ids: ['accepted-after-gateway-error'] }) });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[0][1].body, f.calls[1][1].body);
+  assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+  assert.equal(f.alerts.length, 1);
+});
+
+test('structured validation errors without a retry flag are not retried', async () => {
+  const f = clientFixture({ fetch: async () => Response.json({ error: 'Invalid contact list.' }, { status: 400 }) });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.calls.length, 1);
+  assert.match(f.service.getDistressEmailStatus().message, /Invalid contact list/);
+  assert.match(f.alerts[0][1], /Review your emergency contacts/);
+});
+
+test('a valid JSON response is accepted even when its content-type header is missing', async () => {
+  const f = clientFixture({ fetch: async () => new Response(JSON.stringify({ success: true, ids: ['accepted'] })) });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+});
+
+test('a duplicated environment assignment fails with configuration guidance before any request', async () => {
+  for (const env of [
+    { EXPO_PUBLIC_API_URL: 'EXPO_PUBLIC_API_URL=http://127.0.0.1:8787' },
+    { EXPO_PUBLIC_DISTRESS_EMAIL_URL: 'EXPO_PUBLIC_DISTRESS_EMAIL_URL=http://127.0.0.1:8787/distress' },
+  ]) {
+    const f = clientFixture({ env });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.equal(f.calls.length, 0);
+    assert.match(f.service.getDistressEmailStatus().message, /only the URL after the equals sign/);
+    assert.doesNotMatch(f.alerts[0][1], /EXPO_PUBLIC|equals sign/);
   }
 });
 
@@ -335,7 +442,8 @@ test('missing URLs and invalid signal payloads do not submit email requests', as
   await f.service.sendConfirmedDistressEmail(f.signal());
   assert.equal(f.calls.length, 0);
   assert.equal(f.service.getDistressEmailStatus().phase, 'failed');
-  assert.match(f.alerts[0][1], /EXPO_PUBLIC_API_URL/);
+  assert.match(f.service.getDistressEmailStatus().message, /EXPO_PUBLIC_API_URL/);
+  assert.match(f.alerts[0][1], /email service settings/);
 });
 
 test('explicit standalone URL is honored and emulator URLs use the Expo host on physical phones', async () => {
@@ -351,14 +459,15 @@ test('explicit standalone URL is honored and emulator URLs use the Expo host on 
   const unreachable = clientFixture({ env: { EXPO_PUBLIC_API_URL: 'http://10.0.2.2:8083' } });
   await unreachable.service.sendConfirmedDistressEmail(unreachable.signal());
   assert.equal(unreachable.calls.length, 0);
-  assert.match(unreachable.alerts[0][1], /LAN address/);
+  assert.match(unreachable.service.getDistressEmailStatus().message, /LAN address/);
+  assert.doesNotMatch(unreachable.alerts[0][1], /LAN address|adb|EXPO_PUBLIC/);
 });
 
 test('root listener forwards validated events and removes its subscription', async () => {
   let callback;
   let removed = false;
   const f = clientFixture({ emitter: { addListener: (name, cb) => {
-    assert.equal(name, 'sahey.distress.confirmed'); callback = cb;
+    assert.equal(name, 'halo.distress.confirmed'); callback = cb;
     return { remove: () => { removed = true; } };
   } } });
   const Listener = f.load('src/components/distress-email-listener.tsx').default;
@@ -392,7 +501,7 @@ test('app-to-handler integration recovers from a lost acknowledgement with one p
 test('confirmed distress emails every saved contact privately without an environment recipient list', async () => {
   let messages;
   const server = serverFixture({
-    env: { NODE_ENV: 'development', RESEND_API_KEY: 'key', SAHEY_FROM_EMAIL: ENV.SAHEY_FROM_EMAIL },
+    env: { NODE_ENV: 'development', RESEND_API_KEY: 'key', HALO_FROM_EMAIL: ENV.HALO_FROM_EMAIL },
     fetch: async (url, init) => {
       assert.equal(url, 'https://api.resend.com/emails/batch');
       messages = JSON.parse(init.body);
@@ -406,7 +515,7 @@ test('confirmed distress emails every saved contact privately without an environ
   await f.service.sendConfirmedDistressEmail(f.signal());
   assert.deepEqual(messages.map(message => message.to), [['one@recipient.test'], ['two@recipient.test']]);
   assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
-  assert.match(f.alerts[0][1], /all 2 saved emergency contact/);
+  assert.match(f.alerts[0][1], /your 2 emergency contacts/);
 });
 
 test('missing or invalid contacts and storage errors never send a distress request', async () => {
@@ -425,7 +534,7 @@ test('missing or invalid contacts and storage errors never send a distress reque
 });
 
 test('retries retain the original contacts while a later incident uses newly saved contacts', async () => {
-  const key = 'sahey.emergency-contacts-email';
+  const key = 'halo.emergency-contacts-email';
   const storage = new Map([[key, JSON.stringify([{ name: 'Original', email: 'original@recipient.test' }])]]);
   let first = true;
   const f = clientFixture({ storage, fetch: async (_url, init) => {
@@ -446,9 +555,30 @@ test('retries retain the original contacts while a later incident uses newly sav
 });
 
 test('the legacy saved emergency contact is used by automatic distress emails', async () => {
-  const f = clientFixture({ storage: new Map([['sahey.emergency-contact-email', JSON.stringify({ name: 'Legacy', email: 'legacy@recipient.test' })]]) });
+  for (const key of ['halo.emergency-contact-email', 'sahey.emergency-contact-email']) {
+    const f = clientFixture({ storage: new Map([[key, JSON.stringify({ name: 'Legacy', email: 'legacy@recipient.test' })]]) });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.deepEqual(JSON.parse(f.calls[0][1].body).to, ['legacy@recipient.test']);
+    assert.ok(f.storage.has('halo.emergency-contact-email'));
+  }
+});
+
+test('contacts saved under the previous brand migrate without resurrecting removed contacts', async () => {
+  const previous = JSON.stringify([{ name: 'Saved', email: 'saved@recipient.test' }]);
+  const f = clientFixture({ storage: new Map([['sahey.emergency-contacts-email', previous]]) });
   await f.service.sendConfirmedDistressEmail(f.signal());
-  assert.deepEqual(JSON.parse(f.calls[0][1].body).to, ['legacy@recipient.test']);
+  assert.equal(f.storage.get('halo.emergency-contacts-email'), previous);
+  assert.deepEqual(JSON.parse(f.calls[0][1].body).to, ['saved@recipient.test']);
+  const removed = clientFixture({ storage: new Map([['halo.emergency-contacts-email', '[]'], ['sahey.emergency-contacts-email', previous]]) });
+  await removed.service.sendConfirmedDistressEmail(removed.signal());
+  assert.equal(removed.calls.length, 0);
+  assert.equal(removed.storage.get('halo.emergency-contacts-email'), '[]');
+});
+
+test('older in-flight incident IDs retain their provider key across the brand upgrade', async () => {
+  const f = serverFixture();
+  await f.handle(request(payload({ eventId: 'distress-older-incident' })));
+  assert.equal(f.calls[0].headers['Idempotency-Key'], 'sahey-distress/distress-older-incident');
 });
 
 test('acceptance for only some saved contacts is never reported as success', async () => {
@@ -459,4 +589,265 @@ test('acceptance for only some saved contacts is never reported as success', asy
   await f.service.sendConfirmedDistressEmail(f.signal());
   assert.equal(f.calls.length, 3);
   assert.equal(f.service.getDistressEmailStatus().phase, 'failed');
+});
+
+test('all emergency contacts receive a distress signal with the phone coordinates, accuracy and Maps link', async () => {
+  let messages;
+  const server = serverFixture({ fetch: async (_url, init) => {
+    messages = JSON.parse(init.body);
+    return Response.json({ data: messages.map((_, n) => ({ id: `located-${n}` })) });
+  } });
+  const f = clientFixture({
+    contacts: [{ name: 'One', email: 'one@recipient.test' }, { name: 'Two', email: 'two@recipient.test' }],
+    fetch: async (url, init) => server.handle(new Request(url, init)),
+  });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(messages.length, 2);
+  for (const message of messages) {
+    assert.match(message.subject, /Distress Signal/);
+    assert.match(message.text, /CONFIRMED DISTRESS/);
+    assert.match(message.text, /Latitude: 40.7128/);
+    assert.match(message.text, /Longitude: -74.006/);
+    assert.match(message.text, /https:\/\/www.google.com\/maps\/search\/\?api=1&query=40.7128,-74.006/);
+    assert.match(message.text, /GPS acquired:/);
+    assert.match(message.text, /accuracy: approximately 12 meters/);
+    assert.equal(message.to.length, 1);
+  }
+  assert.equal(f.locationCalls.positions, 1);
+  assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+  assert.match(f.alerts[0][1], /includes the phone location/);
+});
+
+test('permission is requested if allowed and a granted permission adds location', async () => {
+  const f = clientFixture({ permission: { granted: false, canAskAgain: true } });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.locationCalls.permissionRequests, 1);
+  assert.equal(f.locationCalls.positions, 1);
+  assert.equal(JSON.parse(f.calls[0][1].body).location.latitude, 40.7128);
+});
+
+test('denied permission, disabled services, errors and stale GPS do not block the distress email', async () => {
+  for (const [options, reason] of [
+    [{ permission: { granted: false, canAskAgain: false } }, 'permission-denied'],
+    [{ permission: { granted: false, canAskAgain: true }, requestedPermission: { granted: false, canAskAgain: false } }, 'permission-denied'],
+    [{ servicesEnabled: false }, 'services-disabled'],
+    [{ getPosition: async () => { throw new Error('GPS failed'); } }, 'unavailable'],
+    [{ position: { coords: { latitude: 40, longitude: -74, accuracy: 5 }, timestamp: NOW - 60_001 } }, 'stale-location'],
+    [{ position: { coords: { latitude: 40, longitude: -74, accuracy: 5 }, timestamp: NOW + 10_001 } }, 'stale-location'],
+    [{ position: { coords: { latitude: 91, longitude: -74 }, timestamp: NOW } }, 'unavailable'],
+  ]) {
+    let sent;
+    const server = serverFixture({ fetch: async (_url, init) => { sent = JSON.parse(init.body); return Response.json({ id: 'without-location' }); } });
+    const f = clientFixture({ ...options, fetch: async (url, init) => server.handle(new Request(url, init)) });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    const submitted = JSON.parse(f.calls[0][1].body);
+    assert.equal(submitted.location, null);
+    assert.equal(submitted.locationUnavailableReason, reason);
+    assert.match(sent.text, /Phone location unavailable/);
+    assert.doesNotMatch(sent.text, /Google Maps:/);
+    assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+    assert.match(f.alerts[0][1], /Phone location was unavailable/);
+  }
+});
+
+test('GPS and permission timeouts send the alert and late permission grants do not start GPS', async () => {
+  for (const stage of ['permission', 'gps']) {
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    const f = clientFixture(stage === 'permission'
+      ? { permissionCheck: () => pending } : { getPosition: () => pending });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    const submitted = JSON.parse(f.calls[0][1].body);
+    assert.equal(submitted.location, null);
+    assert.equal(submitted.locationUnavailableReason, 'timeout');
+    assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+    const original = f.calls[0][1].body;
+    release(stage === 'permission' ? { granted: true } : { coords: { latitude: 1, longitude: 2 }, timestamp: NOW });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.calls[0][1].body, original);
+    if (stage === 'permission') assert.equal(f.locationCalls.positions, 0);
+  }
+});
+
+test('location is captured once per incident, remains identical on retry, and refreshes for a new signal', async () => {
+  let fail = true;
+  const f = clientFixture({ fetch: async () => {
+    if (fail) throw new Error('Offline');
+    return Response.json({ success: true, ids: ['located'] });
+  } });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  fail = false; f.advance(1000);
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.locationCalls.positions, 1);
+  assert.equal(new Set(f.calls.map(call => call[1].body)).size, 1);
+  const firstLocation = JSON.parse(f.calls[0][1].body).location;
+  f.advance(60_001); await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.locationCalls.positions, 2);
+  assert.notEqual(JSON.parse(f.calls.at(-1)[1].body).location.acquiredAt, firstLocation.acquiredAt);
+});
+
+test('server rejects invalid phone locations before contacting Resend', async () => {
+  const valid = { latitude: 40.7128, longitude: -74.006, acquiredAt: new Date(NOW).toISOString(), accuracyMeters: 12 };
+  for (const location of [false, [], 'location', {}, { ...valid, latitude: 91 }, { ...valid, longitude: -181 },
+    { ...valid, latitude: '40.7' }, { ...valid, acquiredAt: 'invalid' },
+    { ...valid, acquiredAt: new Date(NOW - 60_001).toISOString() }, { ...valid, acquiredAt: new Date(NOW + 10_001).toISOString() },
+    { ...valid, accuracyMeters: -1 }, { ...valid, accuracyMeters: '12' }]) {
+    const f = serverFixture();
+    assert.equal((await f.handle(request(payload({ location })))).status, 400);
+    assert.equal(f.calls.length, 0);
+  }
+  const f = serverFixture();
+  assert.equal((await f.handle(request(payload({ location: null, locationUnavailableReason: '__proto__' })))).status, 400);
+  assert.equal((await f.handle(request(payload({ location: valid, locationUnavailableReason: 'timeout' })))).status, 400);
+});
+
+test('location changes cannot reuse an incident ID and valid retries stay idempotent as the GPS fix ages', async () => {
+  let time = NOW;
+  const f = serverFixture({ now: () => time });
+  const location = { latitude: 0, longitude: 0, acquiredAt: new Date(NOW).toISOString(), accuracyMeters: null };
+  assert.equal((await f.handle(request(payload({ location })))).status, 200);
+  time += 70_000;
+  const retry = await f.handle(request(payload({ location })));
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).duplicate, true);
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.handle(request(payload({ location: { ...location, latitude: 1 } })))).status, 409);
+  assert.equal((await f.handle(request(payload({ location: null })))).status, 409);
+});
+
+test('an older server cannot silently claim location inclusion or trigger another accepted email', async () => {
+  for (const location of [undefined, { status: 'included', acquiredAt: 'wrong-time', source: 'current' }, { status: 'unavailable', reason: 'timeout' }]) {
+    const f = clientFixture({ fetch: async () => Response.json({ success: true, ids: ['old-server-id'], location }) });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.equal(f.service.getDistressEmailStatus().phase, 'accepted');
+    assert.equal(f.service.getDistressEmailStatus().locationStatus, 'unconfirmed');
+    assert.match(f.alerts[0][1], /did not confirm that location was included/);
+    assert.doesNotMatch(f.alerts[0][1], /alert includes the phone location/);
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('unavailable-location acknowledgements show the actual reason without blocking the email', async () => {
+  const f = clientFixture({ servicesEnabled: false });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.service.getDistressEmailStatus().locationStatus, 'unavailable');
+  assert.match(f.alerts[0][1], /Location services are off/);
+  assert.equal(f.locationCalls.positions, 0);
+  assert.equal(f.locationCalls.recentPositions, 0);
+});
+
+test('a fresh fix is preferred and never reads an older saved position', async () => {
+  const f = clientFixture();
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(f.locationCalls.positions, 1);
+  assert.equal(f.locationCalls.recentPositions, 0);
+  assert.equal(f.service.getDistressEmailStatus().locationStatus, 'included');
+});
+
+test('a failed or stalled fresh fix falls back to a recent position and labels the email honestly', async () => {
+  for (const getPosition of [async () => { throw new Error('GPS unavailable'); }, () => new Promise(() => {})]) {
+    let sent;
+    const server = serverFixture({ fetch: async (_url, init) => { sent = JSON.parse(init.body); return Response.json({ id: 'recent-location' }); } });
+    const f = clientFixture({ getPosition, recentPosition: { coords: { latitude: 40.712, longitude: -74.005, accuracy: 150 }, timestamp: NOW - 30_000 },
+      fetch: (url, init) => server.handle(new Request(url, init)) });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    const body = JSON.parse(f.calls[0][1].body);
+    assert.equal(body.location.source, 'recent');
+    assert.equal(body.location.acquiredAt, new Date(NOW - 30_000).toISOString());
+    assert.match(sent.text, /Recent phone location \(last known position within one minute\)/);
+    assert.match(sent.text, /Google Maps:/);
+    assert.equal(f.service.getDistressEmailStatus().locationSource, 'recent');
+    assert.match(f.alerts[0][1], /recent phone location/);
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('stale, invalid, inaccurate and hanging saved fixes never become a location claim', async () => {
+  for (const recentPosition of [
+    { coords: { latitude: 40, longitude: -74, accuracy: 100 }, timestamp: NOW - 60001 },
+    { coords: { latitude: 40, longitude: -74, accuracy: 100 }, timestamp: NOW + 10001 },
+    { coords: { latitude: 91, longitude: -74, accuracy: 100 }, timestamp: NOW },
+    { coords: { latitude: 40, longitude: -74, accuracy: 1001 }, timestamp: NOW },
+    { coords: { latitude: 40, longitude: -74, accuracy: null }, timestamp: NOW },
+  ]) {
+    const f = clientFixture({ getPosition: async () => { throw new Error('No fix'); }, recentPosition });
+    await f.service.sendConfirmedDistressEmail(f.signal());
+    assert.equal(JSON.parse(f.calls[0][1].body).location, null);
+    assert.equal(f.service.getDistressEmailStatus().locationStatus, 'unavailable');
+  }
+  const f = clientFixture({ getPosition: async () => { throw new Error('No fix'); }, getRecentPosition: () => new Promise(() => {}) });
+  await f.service.sendConfirmedDistressEmail(f.signal());
+  assert.equal(JSON.parse(f.calls[0][1].body).locationUnavailableReason, 'timeout');
+});
+
+test('server location acknowledgement survives idempotent retries and validates fallback metadata', async () => {
+  const location = { latitude: 40, longitude: -74, acquiredAt: new Date(NOW - 30_000).toISOString(), accuracyMeters: 100, source: 'recent' };
+  const f = serverFixture();
+  const first = await (await f.handle(request(payload({ location })))).json();
+  assert.deepEqual(first.location, { status: 'included', acquiredAt: location.acquiredAt, source: 'recent' });
+  const second = await (await f.handle(request(payload({ location })))).json();
+  assert.deepEqual(first.location, second.location);
+  assert.equal(second.duplicate, true);
+  assert.equal(f.calls.length, 1);
+  const invalid = serverFixture();
+  assert.equal((await invalid.handle(request(payload({ location: { ...location, source: 'made-up' } })))).status, 400);
+  assert.equal(invalid.calls.length, 0);
+});
+
+test('manual sharing waits past the distress cutoff and requests GPS-assisted accuracy', async () => {
+  const timers = [];
+  let release;
+  const f = clientFixture({ sharing: true, getPosition: () => new Promise(resolve => { release = resolve; }),
+    scheduleTimeout: (callback, ms) => { const timer = { callback, ms, cancelled: false }; timers.push(timer); return timer; },
+    cancelTimeout: timer => { timer.cancelled = true; } });
+  let finished = false;
+  const resultPromise = f.load('src/lib/distressLocation.ts').getDistressLocation({ purpose: 'sharing' }).then(result => { finished = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(timers.map(timer => timer.ms).sort((a, b) => a - b), [45000, 60000]);
+  f.advance(15_000);
+  for (const timer of timers) if (!timer.cancelled && timer.ms <= 15000) timer.callback();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  release({ coords: { latitude: 40, longitude: -74, accuracy: 15 }, timestamp: NOW + 15000 });
+  const result = await resultPromise;
+  assert.equal(result.location.latitude, 40);
+  assert.equal(f.locationCalls.recentPositions, 0);
+  assert.equal(timers.every(timer => timer.cancelled), true);
+});
+
+test('manual sharing remains bounded and rejects a GPS result arriving after its deadline', async () => {
+  const timers = [];
+  let release;
+  const f = clientFixture({ sharing: true, getPosition: () => new Promise(resolve => { release = resolve; }),
+    scheduleTimeout: (callback, ms) => { const timer = { callback, ms, cancelled: false }; timers.push(timer); return timer; },
+    cancelTimeout: timer => { timer.cancelled = true; } });
+  const pending = f.load('src/lib/distressLocation.ts').getDistressLocation({ purpose: 'sharing' });
+  await new Promise(resolve => setImmediate(resolve));
+  f.advance(45000);
+  timers.find(timer => timer.ms === 45000).callback();
+  const result = await pending;
+  assert.equal(result.location, null);
+  assert.equal(result.locationUnavailableReason, 'timeout');
+  assert.equal(f.locationCalls.recentPositions, 1);
+  release({ coords: { latitude: 40, longitude: -74, accuracy: 15 }, timestamp: NOW + 45000 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.location, null);
+  assert.equal(timers.every(timer => timer.cancelled), true);
+});
+
+test('manual permission timeout stops a late grant from starting a GPS lookup', async () => {
+  const timers = [];
+  let release;
+  const f = clientFixture({ sharing: true, permissionCheck: () => new Promise(resolve => { release = resolve; }),
+    scheduleTimeout: (callback, ms) => { const timer = { callback, ms, cancelled: false }; timers.push(timer); return timer; },
+    cancelTimeout: timer => { timer.cancelled = true; } });
+  const pending = f.load('src/lib/distressLocation.ts').getDistressLocation({ purpose: 'sharing' });
+  assert.equal(timers[0].ms, 60000);
+  timers[0].callback();
+  assert.equal((await pending).locationUnavailableReason, 'timeout');
+  release({ granted: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.locationCalls.positions, 0);
+  assert.equal(f.locationCalls.recentPositions, 0);
 });
