@@ -1,11 +1,9 @@
-﻿import { Link } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
+﻿import { Link, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator } from 'react-native';
-import { loadWearableSetup } from '../lib/wearableStorage';
-import { useWearable } from '../hooks/use-wearable';
+import { ActivityIndicator, DeviceEventEmitter, Pressable, StyleSheet, Text, View } from 'react-native';
 import { WearableMessage } from '../components/wearable-message';
+import { useWearable } from '../hooks/use-wearable';
+import { loadWearableSetup } from '../lib/wearableStorage';
 
 export default function MenuScreen() {
   const router = useRouter();
@@ -29,16 +27,44 @@ export default function MenuScreen() {
       </Text>
 
       <Link href="/tapping-pattern" style={styles.link}>
-        Set Tapping Pattern {'\u2192'}
+        Set Tapping Pattern
       </Link>
       <Link href="/emergency-contact" style={styles.link}>
-        Emergency Contact {'\u2192'}
+        Emergency Contact
       </Link>
       <Link href="/location-sharing" style={styles.link}>
-        Location Sharing {'\u2192'}
+        Location Sharing
       </Link>
       <Link href="/wearable-setup" style={styles.link}>Wearable Connection</Link>
       <Text style={styles.description}>{wearable.connected ? `Connected to ${wearable.connected.name}` : 'Wearable not connected'}</Text>
+
+      {__DEV__ && (
+        <Pressable
+          onPress={() => {
+            console.log('[SAHEY TEST] Simulating distress');
+
+             DeviceEventEmitter.emit('sahey.distress.confirmed');
+          }}
+          style={{
+              backgroundColor: '#B00020',
+              padding: 16,
+              borderRadius: 12,
+              alignItems: 'center',
+              marginTop: 20,
+          }}
+        >
+          <Text
+            style={{
+              color: '#FFFFFF',
+              fontWeight: '700',
+              fontSize: 16,
+          }}
+          >
+      Simulate Distress (DEV ONLY)
+    </Text>
+  </Pressable>
+)}
+
       <WearableMessage />
     </View>
   );
