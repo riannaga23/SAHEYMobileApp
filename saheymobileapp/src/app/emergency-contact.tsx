@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { previewTestAlert, sendTestAlert } from '../lib/alert';
-import { type EmergencyContact, loadEmergencyContacts, saveEmergencyContacts } from '../lib/emergencyContact';
-
-type Preview = Awaited<ReturnType<typeof previewTestAlert>>;
+import { ui } from '../components/ui/app-layout';
+import { type EmergencyContact, getEmergencyContactEmails, loadEmergencyContacts, saveEmergencyContacts } from '../lib/emergencyContact';
 
 export default function EmergencyContactScreen() {
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
@@ -14,7 +12,6 @@ export default function EmergencyContactScreen() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [preview, setPreview] = useState<Preview>(null);
 
   useEffect(() => {
     let active = true;
@@ -58,6 +55,11 @@ export default function EmergencyContactScreen() {
     const updated = [...contacts];
     if (editingIndex === null) updated.push(next);
     else updated[editingIndex] = next;
+    try { getEmergencyContactEmails(updated); }
+    catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Check your contact email addresses.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -67,7 +69,6 @@ export default function EmergencyContactScreen() {
       setEditingIndex(null);
       setName('');
       setEmail('');
-      setPreview(null);
     } catch {
       setError('Could not save the contacts. Please try again.');
     } finally {
@@ -86,7 +87,6 @@ export default function EmergencyContactScreen() {
           try {
             await saveEmergencyContacts(updated);
             setContacts(updated);
-            setPreview(null);
             setFormVisible(updated.length === 0);
             setEditingIndex(null);
             setName('');
@@ -101,89 +101,49 @@ export default function EmergencyContactScreen() {
     ]);
   }
 
-  async function showPreview() {
-    setBusy(true);
-    setError('');
-    try {
-      setPreview(await previewTestAlert());
-    } catch {
-      setError('Could not load the contacts for the preview.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function sendEmail() {
-    setBusy(true);
-    setError('');
-    try {
-      const { accepted, failed } = await sendTestAlert();
-      Alert.alert('Test email results', `${accepted} accepted by Resend; ${failed} failed. Check the recipients' inboxes.`);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not send test emails.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-      <Text style={styles.heading}>Emergency Contacts</Text>
+    <ScrollView style={ui.screen} contentContainerStyle={ui.content} keyboardShouldPersistTaps="handled">
+      <Text style={ui.heading}>Emergency contacts</Text>
+      <Text style={ui.body}>Distress emails go to these contacts and include your phone’s location when available. Save up to 10 people you trust.</Text>
       {loading ? <Text>Loading contacts…</Text> : (
         <>
           {contacts.map((contact, index) => (
             <View key={contact.email} style={styles.contact}>
-              <Text style={styles.detail}>{contact.name}</Text>
-              <Text style={styles.detail}>{contact.email}</Text>
-              <Pressable onPress={() => startEdit(index)} disabled={busy}>
+              <Text style={ui.title}>{contact.name}</Text>
+              <Text style={ui.body}>{contact.email}</Text>
+              <View style={styles.actions}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Edit ${contact.name}`} style={styles.textAction} onPress={() => startEdit(index)} disabled={busy} hitSlop={8}>
                 <Text style={styles.link}>Edit</Text>
               </Pressable>
-              <Pressable onPress={() => confirmRemove(index)} disabled={busy}>
-                <Text style={styles.link}>Remove</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${contact.name}`} style={styles.textAction} onPress={() => confirmRemove(index)} disabled={busy} hitSlop={8}>
+                <Text style={[styles.link, styles.remove]}>Remove</Text>
               </Pressable>
+              </View>
             </View>
           ))}
           {formVisible ? (
-            <>
+            <View style={ui.card}>
               <Text style={styles.label}>{editingIndex === null ? 'Add contact' : 'Edit contact'}</Text>
               <TextInput style={styles.input} value={name} onChangeText={setName}
-                placeholder="Contact name" autoCapitalize="words" editable={!busy} />
+                accessibilityLabel="Contact name" placeholder="Contact name" autoCapitalize="words" editable={!busy} />
               <TextInput style={styles.input} value={email} onChangeText={setEmail}
-                placeholder="contact@example.com" keyboardType="email-address"
+                accessibilityLabel="Email address" placeholder="Email address" keyboardType="email-address"
                 autoCapitalize="none" autoCorrect={false} editable={!busy} />
-              <Pressable style={styles.button} onPress={save} disabled={busy}>
-                <Text style={styles.buttonText}>Save contact</Text>
+              <Pressable accessibilityRole="button" style={[styles.button, busy && ui.disabled]} onPress={save} disabled={busy}>
+                <Text style={styles.buttonText}>{busy ? 'Saving…' : 'Save contact'}</Text>
               </Pressable>
               {contacts.length > 0 && (
-                <Pressable onPress={() => { setFormVisible(false); setError(''); }} disabled={busy}>
+                <Pressable accessibilityRole="button" style={styles.textAction} onPress={() => { setFormVisible(false); setError(''); }} disabled={busy}>
                   <Text style={styles.link}>Cancel</Text>
                 </Pressable>
               )}
-            </>
+            </View>
           ) : (
-            <Pressable style={styles.button} onPress={startAdd} disabled={busy}>
-              <Text style={styles.buttonText}>Add another contact</Text>
+            <Pressable accessibilityRole="button" style={[styles.button, (busy || contacts.length >= 10) && ui.disabled]} onPress={startAdd} disabled={busy || contacts.length >= 10}>
+              <Text style={styles.buttonText}>{contacts.length >= 10 ? 'All 10 contact slots are filled' : 'Add a contact'}</Text>
             </Pressable>
           )}
-          {!!error && <Text style={styles.error}>{error}</Text>}
-          {contacts.length > 0 && (
-            <>
-              <Pressable style={styles.testButton} onPress={showPreview} disabled={busy}>
-                <Text style={styles.testButtonText}>Preview test alert</Text>
-              </Pressable>
-              {preview && (
-                <View style={styles.preview}>
-                  <Text style={styles.label}>Preview only — no email sent</Text>
-                  <Text>To: {preview.to.join(', ')}</Text>
-                  <Text>Subject: {preview.subject}</Text>
-                  <Text>Message: {preview.message}</Text>
-                </View>
-              )}
-              <Pressable style={styles.testButton} onPress={sendEmail} disabled={busy}>
-                <Text style={styles.testButtonText}>Send test email to all (development only)</Text>
-              </Pressable>
-            </>
-          )}
+          {!!error && <Text style={styles.error} accessibilityRole="alert">{error}</Text>}
         </>
       )}
     </ScrollView>
@@ -191,26 +151,14 @@ export default function EmergencyContactScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flexGrow: 1, padding: 24, backgroundColor: '#FFFFFF' },
-  heading: { fontSize: 24, fontWeight: 'bold', marginBottom: 24 },
-  label: { fontSize: 16, fontWeight: '600', marginBottom: 8 },
-  placeholder: {
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#CCCCCC',
-    borderRadius: 10,
-    marginBottom: 20,
-  },
-  placeholderText: { color: '#777777' },
-  note: { color: '#555555', marginTop: 8 },
-  input: { borderWidth: 1, borderColor: '#CCCCCC', borderRadius: 10, padding: 14, fontSize: 16, marginBottom: 20 },
-  contact: { padding: 16, borderWidth: 1, borderColor: '#CCCCCC', borderRadius: 10, marginBottom: 12 },
-  detail: { fontSize: 17, marginBottom: 6 },
-  button: { backgroundColor: '#173B70', padding: 16, borderRadius: 10, marginTop: 8 },
+  label: { fontSize: 16, fontWeight: '600', color: '#172B4D' },
+  input: { borderWidth: 1, borderColor: '#CCD7E6', borderRadius: 12, padding: 14, minHeight: 52, fontSize: 16, backgroundColor: '#FFFFFF', color: '#172B4D' },
+  contact: { padding: 20, borderWidth: 1, borderColor: '#E1E7F0', borderRadius: 16, backgroundColor: '#FFFFFF', gap: 6 },
+  actions: { flexDirection: 'row', gap: 28 },
+  textAction: { minHeight: 44, justifyContent: 'center' },
+  remove: { color: '#A4262C' },
+  button: { backgroundColor: '#173B70', padding: 16, minHeight: 50, borderRadius: 12, marginTop: 8 },
   buttonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', textAlign: 'center' },
-  testButton: { padding: 16, borderWidth: 1, borderColor: '#173B70', borderRadius: 10, marginTop: 28 },
-  testButtonText: { color: '#173B70', fontSize: 16, fontWeight: '600', textAlign: 'center' },
-  link: { color: '#173B70', marginTop: 12, fontSize: 16 },
+  link: { color: '#173B70', fontSize: 15, fontWeight: '600' },
   error: { color: '#B00020', marginTop: 16 },
-  preview: { backgroundColor: '#EAF2FF', padding: 16, borderRadius: 10, gap: 8, marginTop: 16 },
 });

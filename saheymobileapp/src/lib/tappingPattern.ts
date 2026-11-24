@@ -1,16 +1,24 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { legacyStorageKeys, readMigratedSecureItem } from './legacyStorage';
 
-const TAP_COUNT_KEY = 'sahey.tapping-pattern-count';
+const TAP_COUNT_KEY = 'halo.tapping-pattern-count';
 
 function isTapCount(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 export async function loadTapCount(): Promise<number | null> {
-  const raw = Platform.OS === 'web'
-    ? localStorage.getItem(TAP_COUNT_KEY)
-    : await SecureStore.getItemAsync(TAP_COUNT_KEY);
+  let raw: string | null;
+  if (Platform.OS === 'web') {
+    raw = localStorage.getItem(TAP_COUNT_KEY);
+    if (raw === null) {
+      raw = localStorage.getItem(legacyStorageKeys.tapCount);
+      if (raw !== null) localStorage.setItem(TAP_COUNT_KEY, raw);
+    }
+  } else {
+    raw = await readMigratedSecureItem(TAP_COUNT_KEY, legacyStorageKeys.tapCount);
+  }
   if (raw === null) return null;
   const count: unknown = JSON.parse(raw);
   // Do not silently overwrite unreadable or invalid saved data.

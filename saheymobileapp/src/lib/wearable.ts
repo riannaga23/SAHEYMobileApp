@@ -2,8 +2,8 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { DeviceEventEmitter, PermissionsAndroid, Platform } from 'react-native';
 import type { Peripheral } from 'react-native-ble-manager';
-import { loadWearableSetup, saveWearableSetup, type SavedWearable } from './wearableStorage';
 import { isConfirmedDistress } from './distressSignal';
+import { loadWearableSetup, saveWearableSetup, type SavedWearable } from './wearableStorage';
 
 type NativeManager = typeof import('react-native-ble-manager').default;
 export const WEARABLE_NAME = 'HALO-wearable';
@@ -34,7 +34,15 @@ const listeners = new Set<() => void>();
 let manager: NativeManager | null = null;
 let startPromise: Promise<void> | null = null;
 let busy = false;
-let setupSessionActive = false;
+type SetupMessage = { text: string; receivedAt: number };
+type SetupSession = {
+  deviceId: string;
+  phase: 'preparing' | 'starting' | 'recording';
+  pendingTap?: SetupMessage;
+  pendingResult?: SetupMessage;
+};
+let setupSession: SetupSession | null = null;
+let setupVersion = 0;
 let connectionVersion = 0;
 let pendingId: string | null = null;
 let scanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,6 +57,46 @@ export function subscribeWearable(listener: () => void) {
 function update(patch: Partial<WearableSnapshot>) {
   snapshot = { ...snapshot, ...patch };
   listeners.forEach(listener => listener());
+}
+
+export const isWearableSetupRecording = () => setupSession?.phase === 'recording';
+
+export function cancelWearableSetupSession() {
+  setupVersion++;
+  setupSession = null;
+  // A previous recording's raw count must not remain a live count outside setup.
+  if (snapshot.message && /^TAP(?:\s|$)/i.test(snapshot.message.text)) update({ message: null });
+}
+
+function handleWearableText(text: string, deviceId: string, receivedAt: number) {
+  const tapMatch = /^TAP\s+(\d+)$/i.exec(text);
+  const isTap = /^TAP(?:\s|$)/i.test(text);
+  const firmwareMessage = text.toUpperCase();
+  const isResult = firmwareMessage === 'TOO FEW TAPS' || firmwareMessage === 'PATTERN SAVED';
+  if (isTap || isResult) {
+    const session = setupSession;
+    if (!session || session.deviceId !== deviceId || session.phase === 'preparing') return;
+    if (isTap && (!tapMatch || !Number.isSafeInteger(Number(tapMatch[1])) || Number(tapMatch[1]) < 1)) return;
+    if (session.phase === 'starting') {
+      // Some boards notify before write() resolves. Publish only after success,
+      // retaining just the latest cumulative count and the first completion.
+      if (isTap && !session.pendingResult) session.pendingTap = { text, receivedAt };
+      else if (isResult && !session.pendingResult) session.pendingResult = { text, receivedAt };
+      return;
+    }
+    if (isResult) cancelWearableSetupSession();
+  }
+
+  update({ message: { text, receivedAt } });
+  if (isConfirmedDistress(text)) {
+    DeviceEventEmitter.emit('halo.distress.confirmed', { deviceId, receivedAt });
+  } else if (tapMatch) {
+    DeviceEventEmitter.emit('halo.bracelet.tap', Number(tapMatch[1]));
+  } else if (firmwareMessage === 'TOO FEW TAPS') {
+    DeviceEventEmitter.emit('halo.bracelet.too-few');
+  } else if (firmwareMessage === 'PATTERN SAVED') {
+    DeviceEventEmitter.emit('halo.bracelet.pattern-saved');
+  }
 }
 function scanStopped() {
   if (scanTimer) clearTimeout(scanTimer);
@@ -100,44 +148,9 @@ async function ready(): Promise<NativeManager> {
           try {
             const text = decodeURIComponent(event.value.map(byte => `%${byte.toString(16).padStart(2, '0')}`).join(''))
               .replace(/\0+$/g, '').trim();
-
-if (text && !/[\x00-\x08\x0e-\x1f]/.test(text)) {
-  const receivedAt = Date.now();
-  update({ message: { text, receivedAt } });
-
-if (isConfirmedDistress(text)) {
-  console.log('[SAHEY] Confirmed distress BLE event');
-
-  DeviceEventEmitter.emit('sahey.distress.confirmed', { deviceId: event.peripheral, receivedAt });
-}
-
-  // The firmware sends cumulative counts: TAP 1, TAP 2, TAP 3...
-  const tapMatch = /^TAP\s+(\d+)$/i.exec(text);
-
-  if (tapMatch) {
-    const count = Number(tapMatch[1]);
-
-    if (setupSessionActive && Number.isSafeInteger(count) && count > 0
-  ) {
-  DeviceEventEmitter.emit('sahey.bracelet.tap', count);
-  console.log('[HALO BLE] Setup tap count:', count);
-  }
-}
-
-  const firmwareMessage = text.toUpperCase();
-
-  if (firmwareMessage === 'TOO FEW TAPS') {
-    setupSessionActive = false;
-    DeviceEventEmitter.emit('sahey.bracelet.too-few');
-    console.log('[HALO BLE] Firmware rejected tapping pattern');
-  }
-
-  if (firmwareMessage === 'PATTERN SAVED') {
-    console.log('[HALO BLE] Firmware confirmed pattern saved');
-    setupSessionActive = false;
-    DeviceEventEmitter.emit('sahey.bracelet.pattern-saved');
-  }
-}
+            if (text && !/[\x00-\x08\x0e-\x1f]/.test(text)) {
+              handleWearableText(text, event.peripheral, Date.now());
+            }
           } catch { /* Not a UTF-8 text message. */ }
         }),
         native.onDiscoverPeripheral((device: Peripheral) => {
@@ -160,13 +173,14 @@ if (isConfirmedDistress(text)) {
             connectionVersion++;
             pendingId = null;
             notificationSources.clear();
-            setupSessionActive = false;
+            cancelWearableSetupSession();
             update({ connected: null, phase: 'disconnected', messageStatus: 'Disconnected. Reconnect to receive new messages.', error: 'Wearable disconnected. Keep it powered on and nearby, then reconnect.' });
           }
         }),
         native.onDidUpdateState(event => {
           if (event.state !== 'on') {
             connectionVersion++;
+            cancelWearableSetupSession();
             scanStopped();
             notificationSources.clear();
             update({ connected: null, phase: 'disconnected', messageStatus: 'Bluetooth is unavailable.', error: 'Bluetooth is unavailable. Turn it on in Android settings, then reconnect.' });
@@ -209,6 +223,7 @@ export async function scanForWearables() {
 export async function connectWearable(device: Pick<NearbyWearable, 'id' | 'name'>) {
   if (busy || snapshot.connected?.id === device.id) return;
   busy = true;
+  cancelWearableSetupSession();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let attempt = 0;
   try {
@@ -223,9 +238,6 @@ export async function connectWearable(device: Pick<NearbyWearable, 'id' | 'name'
     const operation = native.connect(device.id, { autoconnect: false }).then(async () => {
       if (attempt !== connectionVersion) { await native.disconnect(device.id); throw new Error('Connection cancelled.'); }
       const info = await native.retrieveServices(device.id);
-      console.log('[HALO BLE] Device:', device.name);
-      console.log('[HALO BLE] Services:', JSON.stringify(info.services, null, 2));
-      console.log('[HALO BLE] Characteristics:', JSON.stringify(info.characteristics, null, 2));
       if (attempt !== connectionVersion) { await native.disconnect(device.id); throw new Error('Connection cancelled.');}
 const candidates = info.characteristics?.filter(c =>
   c.service.toLowerCase() === HALO_SERVICE_UUID.toLowerCase() &&
@@ -279,6 +291,7 @@ const candidates = info.characteristics?.filter(c =>
 export async function disconnectWearable(forget = false) {
   if (busy) return;
   busy = true;
+  cancelWearableSetupSession();
   try {
     await stopWearableScan();
     connectionVersion++;
@@ -310,40 +323,32 @@ export async function sendWearableCommand(
     throw new Error('Connect your wearable before sending commands.');
   }
 
-  const native = await ready();
-
-  // Confirm the wearable hasn't disconnected while awaiting ready().
-  if (snapshot.connected?.id !== connected.id) {
-    throw new Error('Wearable disconnected before command could be sent.');
+  cancelWearableSetupSession();
+  const version = setupVersion;
+  const connection = connectionVersion;
+  const session: SetupSession | null = command === 'BEGIN SET UP'
+    ? { deviceId: connected.id, phase: 'preparing' } : null;
+  setupSession = session;
+  try {
+    const native = await ready();
+    if (snapshot.connected?.id !== connected.id || connection !== connectionVersion) {
+      throw new Error('Wearable disconnected before command could be sent.');
+    }
+    if (version !== setupVersion) throw new Error('Wearable setup was cancelled. Press Begin wearable setup to start again.');
+    if (session) session.phase = 'starting';
+    await native.write(connected.id, HALO_SERVICE_UUID, HALO_COMMAND_UUID, Array.from(new TextEncoder().encode(command)));
+    if (version !== setupVersion || connection !== connectionVersion) {
+      throw new Error('Wearable setup was cancelled. Press Begin wearable setup to start again.');
+    }
+    if (session && setupSession === session) {
+      session.phase = 'recording';
+      const { pendingTap, pendingResult } = session;
+      session.pendingTap = session.pendingResult = undefined;
+      if (pendingTap) handleWearableText(pendingTap.text, connected.id, pendingTap.receivedAt);
+      if (pendingResult && setupSession === session) handleWearableText(pendingResult.text, connected.id, pendingResult.receivedAt);
+    }
+  } catch (error) {
+    if (version === setupVersion) cancelWearableSetupSession();
+    throw error;
   }
-
-  const bytes = Array.from(
-    new TextEncoder().encode(command)
-  );
-
-
-const previousSetupState = setupSessionActive;
-
-if (command === 'BEGIN SET UP') {
-  setupSessionActive = true;
-}
-
-try {
-  await native.write(
-    connected.id,
-    HALO_SERVICE_UUID,
-    HALO_COMMAND_UUID,
-    bytes
-  );
-
-  if (command === 'DETECTION MODE') {
-    setupSessionActive = false;
-  }
-
-  console.log('[HALO BLE] Command written:', command);
-} catch (error) {
-  setupSessionActive = previousSetupState;
-  throw error;
-}
-
 }

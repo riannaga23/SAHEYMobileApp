@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+import { legacyStorageKeys, readMigratedSecureItem } from './legacyStorage';
 
 export type EmergencyContact = { name: string; email: string };
 export const MAX_EMERGENCY_CONTACTS = 10;
@@ -16,8 +17,8 @@ export function getEmergencyContactEmails(contacts: EmergencyContact[]): string[
   return emails;
 }
 
-const CONTACTS_KEY = 'sahey.emergency-contacts-email';
-const OLD_CONTACT_KEY = 'sahey.emergency-contact-email';
+const CONTACTS_KEY = 'halo.emergency-contacts-email';
+const OLD_CONTACT_KEY = 'halo.emergency-contact-email';
 
 function isContact(value: unknown): value is EmergencyContact {
   return !!value && typeof value === 'object' && 'name' in value && 'email' in value
@@ -25,13 +26,13 @@ function isContact(value: unknown): value is EmergencyContact {
 }
 
 export async function loadEmergencyContacts(): Promise<EmergencyContact[]> {
-  const saved = await SecureStore.getItemAsync(CONTACTS_KEY);
+  const saved = await readMigratedSecureItem(CONTACTS_KEY, legacyStorageKeys.contacts);
   if (saved !== null) {
     const contacts: unknown = JSON.parse(saved);
     return Array.isArray(contacts) ? contacts.filter(isContact) : [];
   }
   // Show a contact saved by the earlier single-contact version.
-  const old = await SecureStore.getItemAsync(OLD_CONTACT_KEY);
+  const old = await readMigratedSecureItem(OLD_CONTACT_KEY, legacyStorageKeys.contact);
   if (!old) return [];
   const contact: unknown = JSON.parse(old);
   return isContact(contact) ? [contact] : [];
